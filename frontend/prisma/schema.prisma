@@ -1,0 +1,45 @@
+generator client {
+  provider = "sqlite"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:../backend/vapt.db"
+}
+
+model Scan {
+  id            String     @id @default(cuid())
+  scanId        String     @unique
+  name          String
+  mode          String
+  status        String     @default("pending")
+  currentPhase  String     @default("init")
+  targets       String     // JSON array
+  startTime     DateTime?
+  endTime       DateTime?
+  duration      Float?
+  createdAt     DateTime   @default(now())
+  findings      Finding[]
+}
+
+model Finding {
+  id            String   @id @default(cuid())
+  scanId        String
+  title         String
+  description   String   @default("")
+  severity      String   @default("medium")
+  cvssScore     Float?
+  targetHost    String
+  targetPort    Int      @default(443)
+  targetUrl     String   @default("")
+  evidence      String   @default("")
+  remediation   String   @default("")
+  cveIds        String   @default("[]") // JSON array
+  cweIds        String   @default("[]") // JSON array
+  agentSource   String   @default("")
+  confidence    String   @default("medium")
+  status        String   @default("suspected")
+  nvdVerified   Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  scan          Scan     @relation(fields: [scanId], references: [scanId])
+}

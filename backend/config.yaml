@@ -1,0 +1,520 @@
+# ═══════════════════════════════════════════════════════════════
+# VAPT Multi-Agent System — Master Configuration
+# ═══════════════════════════════════════════════════════════════
+
+# ─── Scan Modes ───
+# Available modes: va_only, full_vapt, web_app, api, cloud, iot_cctv, custom
+default_mode: full_vapt
+
+# ─── Scope Profiles ───
+profiles:
+  va_only:
+    name: "Vulnerability Assessment Only"
+    agents:
+      - recon
+      - enum
+      - vuln_scanner
+      - intel
+      - reporter
+    aggressive: false
+    exploit: false
+    description: "Non-intrusive vulnerability assessment. No exploitation."
+
+  full_vapt:
+    name: "Full VAPT"
+    agents:
+      - recon
+      - cloud
+      - enum
+      - vuln_scanner
+      - fuzzer
+      - exploit
+      - intel
+      - reporter
+    aggressive: true
+    exploit: true
+    description: "Complete VAPT with exploitation and intelligent analysis."
+
+  web_app:
+    name: "Web Application"
+    agents:
+      - recon
+      - enum
+      - vuln_scanner
+      - fuzzer
+      - exploit
+      - intel
+      - reporter
+    aggressive: true
+    exploit: true
+    description: "Deep web app testing — XSS, SQLi, SSRF, IDOR, auth bypass."
+
+  api:
+    name: "API Security"
+    agents:
+      - recon
+      - enum
+      - vuln_scanner
+      - fuzzer
+      - exploit
+      - intel
+      - reporter
+    aggressive: true
+    exploit: true
+    focus:
+      - api_endpoints
+      - auth_flaws
+      - rate_limiting
+      - idor
+      - injection
+      - broken_object_level_auth
+    description: "API security testing — endpoints, auth, BOLA, injection, rate limits."
+
+  cloud:
+    name: "Cloud Infrastructure"
+    agents:
+      - recon
+      - cloud
+      - vuln_scanner
+      - intel
+      - reporter
+    aggressive: false
+    exploit: false
+    cloud_providers:
+      - aws
+      - azure
+      - gcp
+    description: "Cloud security — S3 buckets, open storage, cloud misconfigs."
+
+  iot_cctv:
+    name: "IoT & CCTV"
+    agents:
+      - recon
+      - iot_cctv
+      - vuln_scanner
+      - exploit
+      - reporter
+    aggressive: true
+    exploit: true
+    description: "IoT/CCTV — Shodan, Censys, default creds, RTSP, firmware."
+
+  custom:
+    name: "Custom Scope"
+    agents: []
+    aggressive: false
+    exploit: false
+    description: "User-defined custom scope. Specify agents manually."
+
+# ─── Rate Limiting ───
+rate_limiting:
+  requests_per_second: 50
+  concurrent_threads: 10
+  delay_between_requests: 0.1
+  respect_robots_txt: false
+  waf_detection: true
+  waf_evasion: true
+  auto_throttle: true
+  max_retries: 3
+
+# ─── Tool Configuration ───
+tools:
+  subfinder:
+    enabled: true
+    docker_image: "projectdiscovery/subfinder:latest"
+    timeout: 300
+    extra_args: []
+
+  amass:
+    enabled: true
+    docker_image: "caffix/amass:latest"
+    timeout: 600
+    extra_args: []
+
+  assetfinder:
+    enabled: true
+    timeout: 300
+
+  puredns:
+    enabled: true
+    docker_image: ""
+    timeout: 600
+
+  httpx:
+    enabled: true
+    docker_image: "projectdiscovery/httpx:latest"
+    timeout: 300
+    extra_args: ["-status-code", "-title", "-tech-detect", "-content-length"]
+
+  nmap:
+    enabled: true
+    docker_image: "instrumentisto/nmap:latest"
+    timeout: 1200
+    scan_types:
+      - "service_detection"   # -sV
+      - "os_detection"        # -O
+      - "vuln_scan"           # --script=vuln
+      - "default_scripts"     # -sC
+    ports: "1-10000"
+
+  nuclei:
+    enabled: true
+    docker_image: ""
+    timeout: 1800
+    # Large template sets held in memory — give a higher tier than 512m.
+    memory_limit: "1024m"
+    templates_path: "/nuclei-templates"
+    template_tags:
+      - "cve"
+      - "misconfig"
+      - "exposure"
+      - "default-logins"
+      - "token"
+      - "xss"
+      - "sqli"
+      - "ssrf"
+      - "rce"
+      - "lfi"
+      - "rfi"
+      - "idor"
+      - "redirect"
+      - "cors"
+      - "info"
+
+  ffuf:
+    enabled: true
+    docker_image: ""
+    timeout: 600
+    memory_limit: "1024m"
+    wordlist: "/app/wordlists/common-web.txt"
+    wordlists:
+      - "/app/wordlists/common-web.txt"
+      - "/app/wordlists/api-web.txt"
+      - "/app/wordlists/api-routes.txt"
+      - "/app/wordlists/cms-web.txt"
+      - "/app/wordlists/sensitive-files.txt"
+    extensions: ["php", "html", "js", "json", "txt", "bak", "old", "zip", "tar.gz", "sql", "conf", "env", "git"]
+
+  feroxbuster:
+    enabled: true
+    docker_image: "epi052/feroxbuster:latest"
+    timeout: 900
+
+  gobuster:
+    enabled: true
+    timeout: 600
+
+  nikto:
+    enabled: true
+    docker_image: "ghcr.io/sullo/nikto:latest"
+    timeout: 600
+
+  sqlmap:
+    enabled: true
+    docker_image: "sqlmapproject/sqlmap:latest"
+    timeout: 1800
+    memory_limit: "1024m"
+    level: 3
+    risk: 2
+
+  wpscan:
+    enabled: true
+    docker_image: "wpscanteam/wpscan:latest"
+    timeout: 600
+
+  dalfox:
+    enabled: true
+    docker_image: "hahwul/dalfox:latest"
+    timeout: 600
+
+  commix:
+    enabled: true
+    docker_image: "commixproject/commix:latest"
+    timeout: 600
+
+  # Cloud / Intel Tools
+  shodan:
+    enabled: true
+    timeout: 300
+
+  censys:
+    enabled: true
+    timeout: 300
+
+  securitytrails:
+    enabled: true
+    timeout: 300
+
+  s3scanner:
+    enabled: true
+    timeout: 300
+
+  cloud_enum:
+    enabled: true
+    timeout: 300
+
+  cloudfail:
+    enabled: true
+    timeout: 300
+
+  # Fuzzing
+  wfuzz:
+    enabled: true
+    docker_image: "xmendez/wfuzz:latest"
+    timeout: 600
+
+  arjun:
+    enabled: true
+    timeout: 300
+
+  paramspider:
+    enabled: true
+    timeout: 300
+
+  # JS Analysis
+  secretfinder:
+    enabled: true
+    timeout: 300
+
+  jssecrets:
+    enabled: true
+    timeout: 300
+
+  jsfscan:
+    enabled: true
+    timeout: 600
+
+  trufflehog:
+    enabled: true
+    docker_image: "trufflesecurity/trufflehog:latest"
+    timeout: 900
+
+  gitleaks:
+    enabled: true
+    docker_image: "zricethezav/gitleaks:latest"
+    timeout: 600
+
+  # Misc
+  waybackurls:
+    enabled: true
+    timeout: 300
+
+  gau:
+    enabled: true
+    timeout: 300
+
+  wappalyzer:
+    enabled: true
+    timeout: 120
+
+  whatweb:
+    enabled: true
+    docker_image: "ilyaglow/whatweb:latest"
+    timeout: 300
+
+  wafw00f:
+    enabled: true
+    timeout: 300
+
+  httprobe:
+    enabled: true
+    timeout: 120
+
+  # ─── Crawling / Spidering ───
+  katana:
+    enabled: true
+    docker_image: "projectdiscovery/katana:latest"
+    timeout: 600
+    # Katana is a JS-aware crawler and is the most memory-hungry tool in the
+    # pipeline. The flat 512m default OOM-killed it (exit_code 137). Give it a
+    # dedicated tier AND bound the crawl so memory stays predictable:
+    #   -d 3         cap crawl depth (was 5 — the main memory driver)
+    #   -c 10        bound concurrency
+    #   -rl 100      rate-limit requests/sec so in-flight state stays small
+    #   -timeout 10  per-request timeout
+    memory_limit: "1536m"
+    cpu_limit: 1.5
+    extra_args: ["-jc", "-aff", "-d", "3", "-c", "10", "-rl", "100", "-timeout", "10"]
+
+  hakrawler:
+    enabled: true
+    timeout: 300
+
+  gospider:
+    enabled: true
+    timeout: 600
+
+  # ─── P1: JS-heavy crawling + parameter discovery ───
+  # Playwright headless-browser crawler for SPA/JS-rendered apps, run alongside
+  # Katana. Needs a browser image so give it a higher memory tier.
+  playwright_crawler:
+    enabled: true
+    docker_image: "mcr.microsoft.com/playwright:v1.48.0-jammy"
+    timeout: 900
+    memory_limit: "2048m"
+    cpu_limit: 1.5
+
+  arjun:
+    enabled: true
+    docker_image: "ghcr.io/s0md3v/arjun:latest"
+    timeout: 600
+    memory_limit: "768m"
+
+  paramspider:
+    enabled: true
+    docker_image: "devanshbatham/paramspider:latest"
+    timeout: 600
+
+  # ─── DNS / Port Discovery ───
+  dnsx:
+    enabled: true
+    docker_image: "projectdiscovery/dnsx:latest"
+    timeout: 300
+
+  naabu:
+    enabled: true
+    docker_image: "projectdiscovery/naabu:latest"
+    timeout: 600
+    ports: "1-10000"
+
+  # ─── OSINT / Discovery ───
+  uncover:
+    enabled: true
+    docker_image: "projectdiscovery/uncover:latest"
+    timeout: 300
+
+  gf:
+    enabled: true
+    timeout: 120
+
+  crobat:
+    enabled: true
+    timeout: 300
+
+  theHarvester:
+    enabled: true
+    timeout: 300
+
+  # ─── Utility ───
+  meg:
+    enabled: true
+    timeout: 300
+
+  qsreplace:
+    enabled: true
+    timeout: 120
+
+  tlsx:
+    enabled: true
+    docker_image: "projectdiscovery/tlsx:latest"
+    timeout: 300
+
+  testssl:
+    enabled: true
+    timeout: 900
+
+  sslscan:
+    enabled: true
+    timeout: 300
+
+# ─── LLM Configuration ───
+# Supports multiple providers with automatic fallback chain.
+# Set the API key env var or api_key directly. If primary fails, tries fallback_providers in order.
+# Ollama is always added as last fallback (free, local).
+llm:
+  provider: "openai"  # openai, anthropic, gemini, ollama, azure, groq, together, openai_compat
+  model: "gpt-4o"
+  temperature: 0.3
+  max_tokens: 4096
+  api_key_env: "OPENAI_API_KEY"
+
+  # For intelligent analysis (can use a cheaper/faster model)
+  analysis_model: "gpt-4o"
+  # For report writing (can use a different model)
+  report_model: "gpt-4o"
+
+  # Fallback providers — tried in order if primary fails
+  fallback_providers:
+    - provider: "anthropic"
+      model: "claude-sonnet-4-20250514"
+      api_key_env: "ANTHROPIC_API_KEY"
+      max_tokens: 4096
+      temperature: 0.3
+
+    - provider: "gemini"
+      model: "gemini-1.5-pro"
+      api_key_env: "GEMINI_API_KEY"
+      max_tokens: 4096
+      temperature: 0.3
+
+    - provider: "groq"
+      model: "llama-3.1-70b-versatile"
+      api_key_env: "GROQ_API_KEY"
+      max_tokens: 4096
+      temperature: 0.3
+
+    - provider: "ollama"
+      model: "llama3"
+      base_url: "http://localhost:11434"
+      max_tokens: 4096
+      temperature: 0.3
+
+# ─── Database ───
+database:
+  url: "sqlite:///./data/vapt.db"
+  pool_size: 10
+  max_overflow: 20
+
+# ─── Redis ───
+redis:
+  url: "redis://localhost:6379/0"
+  stream_key: "vapt:task_stream"
+
+# ─── Reporting ───
+reporting:
+  formats:
+    - "html"
+    - "pdf"
+    - "markdown"
+    - "json"
+  output_dir: "./reports"
+  include_poc: true
+  include_cvss: true
+  include_remediation: true
+  executive_summary: true
+  company_branding: false
+
+# ─── Docker ───
+docker:
+  network: "vapt_network"
+  auto_pull: true
+  cleanup: true
+  memory_limit: "512m"
+  cpu_limit: 1.0
+
+# ─── Logging ───
+logging:
+  level: "INFO"
+  file: "./logs/vapt.log"
+  max_size: "100MB"
+  rotation: 5
+  json_format: true
+
+# ─── Web Dashboard ───
+dashboard:
+  host: "0.0.0.0"
+  port: 8443
+  ssl: false
+  auth:
+    enabled: true
+    username: "admin"
+    password_env: "VAPT_DASHBOARD_PASSWORD"
+  cors_origins: ["*"]
+
+# ─── Notifications ───
+notifications:
+  webhook_url: ""
+  slack_webhook: ""
+  telegram_bot_token: ""
+  telegram_chat_id: ""
+  on_critical_found: true
+  on_scan_complete: true

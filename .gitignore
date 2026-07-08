@@ -1,0 +1,62 @@
+# Environment & secrets
+.env
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+.venv/
+venv/
+env/
+*.egg
+
+# Node / Frontend
+node_modules/
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+.next/
+.nuxt/
+
+# Logs
+*.log
+*.txt
+logs/
+log_*.txt
+loop_logs.txt
+logs.txt
+
+# Docker volumes / data
+data/
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Artifacts & sample output
+artifacts/
+sample_reports/
+backend/reports/
+
+# TypeScript build artifacts
+*.tsbuildinfo
+
+# Coverage & testing
+.coverage
+htmlcov/
+.pytest_cache/

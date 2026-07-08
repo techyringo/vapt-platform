@@ -1,0 +1,207 @@
+services:
+  # ─── Redis: ARQ task queue (dedicated, durable) ──────────────────
+  # The queue MUST NOT evict keys — evicting a live job/result key under
+  # memory pressure manifests as ConnectionResetError on the worker and
+  # silently lost jobs. Hence noeviction + more headroom than the cache.
+  redis-queue:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 512mb --maxmemory-policy noeviction --appendonly no
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Redis: general cache / future event bus ─────────────────────
+  # Safe to evict — not used for durable queue state.
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─── Python Backend ───────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    expose:
+      - "8443"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/config.yaml:/app/config.yaml:ro
+      - ./backend/wordlists:/app/wordlists:ro
+      - ./backend/reports:/app/reports
+      - ./backend/logs:/app/logs
+      - ./backend/data:/app/data
+      - ./backend/artifacts:/app/artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.vapt-shared:/tmp/vapt-shared
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - CENSYS_API_ID=${CENSYS_API_ID:-}
+      - CENSYS_API_SECRET=${CENSYS_API_SECRET:-}
+      - SECURITYTRAILS_API_KEY=${SECURITYTRAILS_API_KEY:-}
+      - WPSCAN_API_TOKEN=${WPSCAN_API_TOKEN:-}
+      - VAPT_OPENAI_API_KEY=${VAPT_OPENAI_API_KEY:-}
+      - VAPT_ANTHROPIC_API_KEY=${VAPT_ANTHROPIC_API_KEY:-}
+      - VAPT_GEMINI_API_KEY=${VAPT_GEMINI_API_KEY:-}
+      - VAPT_GROQ_API_KEY=${VAPT_GROQ_API_KEY:-}
+      - VAPT_TOGETHER_API_KEY=${VAPT_TOGETHER_API_KEY:-}
+      - VAPT_NVD_API_KEY=${VAPT_NVD_API_KEY:-}
+      - VAPT_SHODAN_API_KEY=${VAPT_SHODAN_API_KEY:-}
+      - VAPT_CENSYS_API_ID=${VAPT_CENSYS_API_ID:-}
+      - VAPT_CENSYS_API_SECRET=${VAPT_CENSYS_API_SECRET:-}
+      - VAPT_SECURITYTRAILS_API_KEY=${VAPT_SECURITYTRAILS_API_KEY:-}
+      - VAPT_WPSCAN_API_TOKEN=${VAPT_WPSCAN_API_TOKEN:-}
+      - VAPT_DATABASE_URL=${VAPT_DATABASE_URL:-sqlite:////app/data/vapt.db}
+      - VAPT_LLM_PROVIDER=${VAPT_LLM_PROVIDER:-}
+      - VAPT_LLM_MODEL=${VAPT_LLM_MODEL:-}
+      - VAPT_LLM_API_KEY_ENV=${VAPT_LLM_API_KEY_ENV:-}
+      - VAPT_LLM_BASE_URL=${VAPT_LLM_BASE_URL:-}
+      - VAPT_LLM_ENABLED=${VAPT_LLM_ENABLED:-false}
+      - VAPT_LLM_ALLOW_FALLBACKS=${VAPT_LLM_ALLOW_FALLBACKS:-false}
+      - VAPT_API_KEY=${VAPT_API_KEY:-}
+      - VAPT_LOG_LEVEL=${VAPT_LOG_LEVEL:-INFO}
+      - VAPT_LOG_DIR=/app/logs
+      - VAPT_ARTIFACT_DIR=/app/artifacts
+      - VAPT_PUBLIC_TARGET_NAME=${VAPT_PUBLIC_TARGET_NAME:-vapt.local}
+      - VAPT_MASK_PRIVATE_TARGETS=${VAPT_MASK_PRIVATE_TARGETS:-true}
+      - VAPT_PROCESS_ROLE=api
+      - REDIS_URL=redis://redis-queue:6379/0
+      - VAPT_EVENT_REDIS_URL=redis://redis:6379/0
+      - VAPT_ARQ_QUEUE=${VAPT_ARQ_QUEUE:-vapt:tools}
+      - VAPT_ARQ_HEALTH_KEY=${VAPT_ARQ_HEALTH_KEY:-vapt:tools:health}
+      - VAPT_ARQ_MAX_CONNECTIONS=${VAPT_ARQ_MAX_CONNECTIONS:-50}
+      - VAPT_AGENT_TIMEOUT_SECONDS=${VAPT_AGENT_TIMEOUT_SECONDS:-1800}
+      - VAPT_SHARED_DIR=/tmp/vapt-shared
+      - VAPT_SHARED_HOST_DIR=${PWD}/.vapt-shared
+      - VAPT_WORDLIST_HOST_DIR=${PWD}/backend/wordlists
+    depends_on:
+      redis-queue:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8443/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # ─── ARQ Tool Workers (scale with: docker compose up --scale worker=N) ───
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "arq", "worker.settings.WorkerSettings"]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backend/config.yaml:/app/config.yaml:ro
+      - ./backend/wordlists:/app/wordlists:ro
+      - ./backend/data:/app/data
+      - ./backend/logs:/app/logs
+      - ./backend/artifacts:/app/artifacts
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./.vapt-shared:/tmp/vapt-shared
+    environment:
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
+      - TOGETHER_API_KEY=${TOGETHER_API_KEY:-}
+      - NVD_API_KEY=${NVD_API_KEY:-}
+      - SHODAN_API_KEY=${SHODAN_API_KEY:-}
+      - CENSYS_API_ID=${CENSYS_API_ID:-}
+      - CENSYS_API_SECRET=${CENSYS_API_SECRET:-}
+      - SECURITYTRAILS_API_KEY=${SECURITYTRAILS_API_KEY:-}
+      - WPSCAN_API_TOKEN=${WPSCAN_API_TOKEN:-}
+      - VAPT_OPENAI_API_KEY=${VAPT_OPENAI_API_KEY:-}
+      - VAPT_ANTHROPIC_API_KEY=${VAPT_ANTHROPIC_API_KEY:-}
+      - VAPT_GEMINI_API_KEY=${VAPT_GEMINI_API_KEY:-}
+      - VAPT_GROQ_API_KEY=${VAPT_GROQ_API_KEY:-}
+      - VAPT_TOGETHER_API_KEY=${VAPT_TOGETHER_API_KEY:-}
+      - VAPT_NVD_API_KEY=${VAPT_NVD_API_KEY:-}
+      - VAPT_SHODAN_API_KEY=${VAPT_SHODAN_API_KEY:-}
+      - VAPT_CENSYS_API_ID=${VAPT_CENSYS_API_ID:-}
+      - VAPT_CENSYS_API_SECRET=${VAPT_CENSYS_API_SECRET:-}
+      - VAPT_SECURITYTRAILS_API_KEY=${VAPT_SECURITYTRAILS_API_KEY:-}
+      - VAPT_WPSCAN_API_TOKEN=${VAPT_WPSCAN_API_TOKEN:-}
+      - VAPT_LOG_LEVEL=${VAPT_LOG_LEVEL:-INFO}
+      - VAPT_LOG_DIR=/app/logs
+      - VAPT_ARTIFACT_DIR=/app/artifacts
+      - VAPT_PUBLIC_TARGET_NAME=${VAPT_PUBLIC_TARGET_NAME:-vapt.local}
+      - VAPT_MASK_PRIVATE_TARGETS=${VAPT_MASK_PRIVATE_TARGETS:-true}
+      - VAPT_PROCESS_ROLE=worker
+      - VAPT_LLM_ENABLED=${VAPT_LLM_ENABLED:-false}
+      - VAPT_LLM_ALLOW_FALLBACKS=${VAPT_LLM_ALLOW_FALLBACKS:-false}
+      - VAPT_LLM_PROVIDER=${VAPT_LLM_PROVIDER:-}
+      - VAPT_LLM_MODEL=${VAPT_LLM_MODEL:-}
+      - VAPT_LLM_API_KEY_ENV=${VAPT_LLM_API_KEY_ENV:-}
+      - VAPT_LLM_BASE_URL=${VAPT_LLM_BASE_URL:-}
+      - REDIS_URL=redis://redis-queue:6379/0
+      - VAPT_EVENT_REDIS_URL=redis://redis:6379/0
+      - VAPT_ARQ_QUEUE=${VAPT_ARQ_QUEUE:-vapt:tools}
+      - VAPT_ARQ_HEALTH_KEY=${VAPT_ARQ_HEALTH_KEY:-vapt:tools:health}
+      - VAPT_ARQ_HEALTH_INTERVAL=${VAPT_ARQ_HEALTH_INTERVAL:-10}
+      - VAPT_ARQ_MAX_CONNECTIONS=${VAPT_ARQ_MAX_CONNECTIONS:-50}
+      - VAPT_AGENT_TIMEOUT_SECONDS=${VAPT_AGENT_TIMEOUT_SECONDS:-1800}
+      - VAPT_DATABASE_URL=${VAPT_DATABASE_URL:-sqlite:////app/data/vapt.db}
+      - VAPT_SHARED_DIR=/tmp/vapt-shared
+      - VAPT_SHARED_HOST_DIR=${PWD}/.vapt-shared
+      - VAPT_WORDLIST_HOST_DIR=${PWD}/backend/wordlists
+      - WORKER_MAX_JOBS=${WORKER_MAX_JOBS:-15}
+    depends_on:
+      redis-queue:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    deploy:
+      replicas: ${WORKER_REPLICAS:-2}
+
+  # ─── Next.js Frontend ─────────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+        - INTERNAL_API_URL=http://backend:8443
+    environment:
+      - NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL:-}
+      - INTERNAL_API_URL=http://backend:8443
+    expose:
+      - "3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Public Reverse Proxy ─────────────────────────────────────────
+  proxy:
+    image: nginx:1.27-alpine
+    ports:
+      - "${VAPT_HTTP_BIND:-127.0.0.1}:${VAPT_HTTP_PORT:-80}:80"
+    volumes:
+      - ./proxy/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    restart: unless-stopped

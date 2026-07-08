@@ -1,0 +1,1431 @@
+'use client';
+
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type React from 'react';
+import {
+  Activity,
+  AlertTriangle,
+  Bot,
+  Boxes,
+  Bug,
+  CheckCircle2,
+  ChevronRight,
+  CircleStop,
+  Download,
+  FileText,
+  Gauge,
+  Info,
+  LayoutDashboard,
+  Lock,
+  Play,
+  RefreshCw,
+  Server,
+  Shield,
+  ShieldAlert,
+  ShieldCheck,
+  Target,
+  Trash2,
+  Wrench,
+  XCircle,
+} from 'lucide-react';
+
+import { useSSE } from '@/hooks/useSSE';
+import { useToast } from '@/hooks/useToast';
+import { api } from '@/lib/api';
+import type { AgentStatus, APIKeyStatus, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import { SEVERITIES } from '@/types';
+import type { SeverityKey } from '@/types';
+
+// Layout
+import { Header } from '@/components/layout/Header';
+import { Sidebar } from '@/components/layout/Sidebar';
+import { MobileTabBar } from '@/components/layout/MobileTabBar';
+
+// UI primitives
+import { EmptyState } from '@/components/ui/EmptyState';
+import { MetricCard } from '@/components/ui/MetricCard';
+import { ReportModal } from '@/components/ui/ReportModal';
+import { ToastContainer } from '@/components/ui/Toast';
+import { SkeletonDashboard, SkeletonAgentCard, SkeletonFindingCard } from '@/components/ui/Skeleton';
+
+// Feature components
+import { SeverityDonut, SEV_HEX } from '@/components/features/SeverityDonut';
+import { FindingCard, SEV_BADGE_CLASS } from '@/components/features/FindingCard';
+import { AgentCard } from '@/components/features/AgentCard';
+import { LiveFeed, type LogMessage } from '@/components/features/LiveFeed';
+
+/* ─── Types ─────────────────────────────────────────────── */
+type Tab = 'dashboard' | 'findings' | 'agents' | 'tools';
+type SeverityFilter = SeverityKey | 'all';
+const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
+
+/* ─── Constants ──────────────────────────────────────────── */
+const FALLBACK_MODES: ScanMode[] = [
+  {
+    id: 'full_vapt',
+    name: 'Full VAPT',
+    description: 'Complete penetration test with exploitation and intelligent analysis.',
+    agents: ['recon', 'enum', 'vuln_scanner', 'fuzzer', 'exploit', 'intel', 'reporter'],
+    exploit: true, aggressive: true, focus: [],
+  },
+  {
+    id: 'va_only',
+    name: 'VA Only',
+    description: 'Non-intrusive assessment: recon, crawling, service enum, template scanning.',
+    agents: ['recon', 'enum', 'vuln_scanner', 'reporter'],
+    exploit: false, aggressive: false, focus: [],
+  },
+];
+
+const PHASE_ORDER = [
+  'recon', 'enumeration', 'vuln_scanning', 'fuzzing',
+  'exploitation', 'intelligence', 'reporting', 'completed',
+] as const;
+
+const ACTIVE_SCAN_STATES = new Set(['running', 'starting', 'pending', 'queued']);
+
+const API_KEY_GROUPS = [
+  { label: 'LLM',   keys: ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY', 'TOGETHER_API_KEY'] },
+  { label: 'Intel', keys: ['NVD_API_KEY', 'SHODAN_API_KEY', 'CENSYS_API_ID', 'CENSYS_API_SECRET', 'SECURITYTRAILS_API_KEY'] },
+  { label: 'CMS',   keys: ['WPSCAN_API_TOKEN'] },
+] as const;
+
+const SEV_DOT_COLOR: Record<string, string> = {
+  critical: '#f43f5e', high: '#f97316', medium: '#eab308', low: '#22c55e', informational: '#06b6d4',
+};
+
+/* ─── Helpers ────────────────────────────────────────────── */
+function formatPhase(phase?: string) {
+  return (phase || 'standby').replace(/_/g, ' ');
+}
+
+function scanTime(scan: Scan) {
+  const parsed = Date.parse(scan.start_time || '');
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function orderScans(scanList: Scan[]) {
+  return [...scanList].sort((a, b) => {
+    const aInactive = ACTIVE_SCAN_STATES.has((a.status || '').toLowerCase()) ? 0 : 1;
+    const bInactive = ACTIVE_SCAN_STATES.has((b.status || '').toLowerCase()) ? 0 : 1;
+    if (aInactive !== bInactive) return aInactive - bInactive;
+    const timeDelta = scanTime(b) - scanTime(a);
+    if (timeDelta !== 0) return timeDelta;
+    return (b.scan_id || '').localeCompare(a.scan_id || '');
+  });
+}
+
+function statusBadgeClass(status?: string) {
+  if (status === 'running')   return 'badge-running';
+  if (status === 'completed') return 'badge-completed';
+  if (status === 'failed' || status === 'cancelled') return 'badge-failed';
+  return 'badge-idle';
+}
+
+function severityLabel(sev: SeverityFilter) {
+  if (sev === 'all') return 'All';
+  return sev === 'informational' ? 'Info' : sev.charAt(0).toUpperCase() + sev.slice(1);
+}
+
+function riskPosture(counts: Record<SeverityKey, number>) {
+  const score = Math.min(100, counts.critical * 24 + counts.high * 13 + counts.medium * 6 + counts.low * 2 + counts.informational);
+  if (score >= 70) return { score, label: 'Critical exposure', color: '#f43f5e' };
+  if (score >= 38) return { score, label: 'High risk',         color: '#f97316' };
+  if (score > 0)   return { score, label: 'Moderate risk',     color: '#22d3ee' };
+  return              { score, label: 'No exposure',            color: '#22c55e' };
+}
+
+function formatAge(value?: string) {
+  if (!value) return 'not started';
+  const ms = Date.now() - new Date(value).getTime();
+  if (!Number.isFinite(ms) || ms < 0) return 'just now';
+  const min = Math.floor(ms / 60000);
+  if (min < 1)  return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24)  return `${hr}h ago`;
+  return `${Math.floor(hr / 24)}d ago`;
+}
+
+function eventLog(event: SSEEvent): LogMessage | null {
+  const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
+  if (event.type === 'ping') return null;
+  if (event.type === 'finding') {
+    return { msg: `Finding: ${event.title || 'new issue'} on ${event.target_host || event.scan_id || 'target'}`, level: event.severity || 'info', time };
+  }
+  if (event.type === 'agent_status') {
+    const key    = event.agent_type || event.data?.agent_type || 'agent';
+    const status = event.status     || event.data?.status     || 'updated';
+    const count  = event.findings_count || event.data?.findings_count;
+    return { msg: `${key} ${status}${count ? ` (${count} findings)` : ''}`, level: status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info', time };
+  }
+  if (event.type === 'log') {
+    return { msg: event.message || event.data?.message || '', level: event.level || event.data?.level || 'info', time };
+  }
+  if (event.type === 'tool_log') {
+    const tool = event.tool || event.data?.tool || 'tool';
+    const line = event.line || event.data?.line || '';
+    if (!line) return null;
+    const stream = event.stream || event.data?.stream;
+    return { msg: `[${tool}] ${line}`, level: stream === 'stderr' ? 'warn' : 'info', time };
+  }
+  if (event.type === 'phase_change') {
+    const phase = event.phase || event.data?.phase;
+    return phase ? { msg: `Phase changed → ${formatPhase(phase)}`, level: 'info', time } : null;
+  }
+  if (event.type === 'scan_started') {
+    const target = Array.isArray(event.targets) ? event.targets.join(', ') : event.scan_id;
+    return { msg: `Scan started: ${target}`, level: 'success', time };
+  }
+  if (event.type === 'scan_deleted') return { msg: `Scan deleted: ${event.scan_id}`, level: 'warn', time };
+  if (event.type === 'scan_complete') return { msg: 'Scan completed successfully', level: 'success', time };
+  if (event.type === 'scan_failed')   return { msg: `Scan failed: ${event.error || 'unknown error'}`, level: 'error', time };
+  return null;
+}
+
+/* ═══════════════════════════════════════════════════════════
+   MAIN DASHBOARD
+═══════════════════════════════════════════════════════════ */
+export default function Dashboard() {
+  /* Core data */
+  const [scans,          setScans]          = useState<Scan[]>([]);
+  const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
+  const [findings,       setFindings]       = useState<Finding[]>([]);
+	  const [agentStatus,    setAgentStatus]    = useState<Record<string, AgentStatus>>({});
+	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
+	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
+  const [modes,          setModes]          = useState<ScanMode[]>([]);
+  const [nvdStats,       setNvdStats]       = useState<NVDStats | null>(null);
+  const [toolsStatus,    setToolsStatus]    = useState<Record<string, any>>({});
+  const [dockerInfo,     setDockerInfo]     = useState<any>(null);
+  const [apiKeyStatus,   setApiKeyStatus]   = useState<APIKeyStatus | null>(null);
+  const [runtimeLogs,    setRuntimeLogs]    = useState<RuntimeLogFile[]>([]);
+  const [apiHealthy,     setApiHealthy]     = useState<boolean | null>(null);
+
+  /* UI state */
+  const [logMessages,       setLogMessages]       = useState<LogMessage[]>([]);
+  const [activeTab,         setActiveTab]         = useState<Tab>('dashboard');
+  const [severityFilter,    setSeverityFilter]    = useState<SeverityFilter>('all');
+  const [showQuarantined,   setShowQuarantined]   = useState(false);
+  const [expandedFindings,  setExpandedFindings]  = useState<Set<string>>(new Set());
+  const [loadingInitial,    setLoadingInitial]    = useState(true);
+  const [loadingFindings,   setLoadingFindings]   = useState(false);
+  const [showReportModal,   setShowReportModal]   = useState(false);
+  const [refreshing,        setRefreshing]        = useState(false);
+  const [starting,          setStarting]          = useState(false);
+
+  /* Launch form */
+  const [targetInput, setTargetInput] = useState('');
+  const [scanMode,    setScanMode]    = useState('va_only');
+  const [scanName,    setScanName]    = useState('');
+
+  const logRef           = useRef<HTMLDivElement>(null);
+  const seenEventsRef    = useRef<Set<string>>(new Set());
+  // Keep a ref to selectedScanId so callbacks always see the current value
+  // without needing to re-create on every selection change.
+  const selectedScanIdRef = useRef<string | null>(null);
+  selectedScanIdRef.current = selectedScanId;
+
+  const toast = useToast();
+
+  /* Derived */
+  const selectedScan = scans.find(s => s.scan_id === selectedScanId) || scans[0];
+  const activeModes  = modes.length ? modes : FALLBACK_MODES;
+  const selectedMode = activeModes.find(m => m.id === scanMode) || activeModes[0];
+
+  /* ─── Finding dedup helper ─── */
+  const _mergeFinding = useCallback((prev: Finding[], f: Finding | SSEEvent): Finding[] => {
+    const candidate = f as unknown as Finding;
+    const k = `${candidate.title}|${candidate.target_host}|${candidate.created_at}`;
+    if (prev.some(e => `${e.title}|${e.target_host}|${e.created_at}` === k)) return prev;
+    return [...prev, candidate];
+  }, []);
+
+  /* ─── Event absorption ─────────────────────────────────────────
+     Handles BOTH SSE and polling paths.
+     - Deduplicates by composite key so the same event never appears twice.
+     - Updates findings state when the event belongs to the viewed scan.
+     - Updates logMessages for all event types.
+  ─────────────────────────────────────────────────────────────── */
+  const absorbEvent = useCallback((event: SSEEvent) => {
+    const key = [
+      event.timestamp || '',
+      event.type,
+      event.scan_id || '',
+      event.title || event.message || event.phase || event.agent_type || event.status || '',
+    ].join('|');
+    if (seenEventsRef.current.has(key)) return false;
+    seenEventsRef.current.add(key);
+    if (seenEventsRef.current.size > 1500) {
+      seenEventsRef.current = new Set(Array.from(seenEventsRef.current).slice(-1000));
+    }
+
+    const log = eventLog(event);
+    if (log?.msg) setLogMessages(prev => [...prev.slice(-299), log]);
+
+    // Update findings when the event belongs to the currently-viewed scan.
+    // This makes the polling path (/api/events) a functional fallback for SSE.
+    if (event.type === 'finding') {
+      const forScan = event.scan_id || '';
+      const viewing = selectedScanIdRef.current || '';
+      if (!forScan || forScan === viewing) {
+        setFindings(prev => _mergeFinding(prev, event));
+      }
+      // Update finding count on the scan in the list regardless.
+      setScans(prev => prev.map(s =>
+        s.scan_id === forScan
+          ? { ...s, total_findings: (s.total_findings || 0) + 1 }
+          : s,
+      ));
+    }
+
+    return true;
+  }, [_mergeFinding]);
+
+  /* ─── SSE handler ─── */
+  const handleEvent = useCallback((event: SSEEvent) => {
+    if (event.type === 'finding') {
+      absorbEvent(event);
+      return;
+    }
+    if (event.type === 'agent_status') {
+      const forScan = event.scan_id || '';
+      const viewing = selectedScanIdRef.current || '';
+      if (!forScan || forScan === viewing) {
+        const name = event.agent_type || event.data?.agent_type;
+        const data = event.data || event;
+        if (name) setAgentStatus(prev => ({ ...prev, [name]: data as AgentStatus }));
+      }
+      absorbEvent(event);
+      return;
+    }
+    if (event.type === 'log') { absorbEvent(event); return; }
+    if (event.type === 'tool_log') {
+      // Ephemeral live output — delivered once via SSE, bypass the dedup key
+      // (which would collapse lines sharing a timestamp).
+      const log = eventLog(event);
+      if (log?.msg) setLogMessages(prev => [...prev.slice(-299), log]);
+      return;
+    }
+    if (event.type === 'phase_change') {
+      const phase = event.phase || event.data?.phase;
+      setScans(prev => prev.map(s =>
+        s.scan_id === event.scan_id ? { ...s, current_phase: phase || s.current_phase } : s,
+      ));
+      absorbEvent(event);
+      return;
+    }
+    if (event.type === 'scan_started') {
+      api.listScans()
+        .then(list => {
+          const ordered = orderScans(list);
+          setScans(ordered);
+          // Auto-switch to the new scan.
+          setSelectedScanId(event.scan_id || ordered[0]?.scan_id || null);
+        })
+        .catch(() => {});
+      absorbEvent(event);
+      return;
+    }
+    if (event.type === 'scan_deleted') {
+      const deletedId = event.scan_id;
+      setScans(prev => prev.filter(scan => scan.scan_id !== deletedId));
+      if (deletedId && deletedId === selectedScanIdRef.current) {
+        setSelectedScanId(null);
+        setFindings([]);
+        setAgentStatus({});
+        setToolRuns([]);
+      }
+      absorbEvent(event);
+      return;
+    }
+    if (event.type === 'scan_complete' || event.type === 'scan_failed') {
+      // Refresh both list AND findings for the completed scan so the UI is consistent.
+      api.listScans().then(list => setScans(orderScans(list))).catch(() => {});
+      const completedId = event.scan_id;
+      if (completedId && completedId === selectedScanIdRef.current) {
+        api.getFindings(completedId)
+          .then(r => setFindings(r.findings))
+          .catch(() => {});
+      }
+      absorbEvent(event);
+    }
+  }, [absorbEvent]);
+
+  const { connected } = useSSE(handleEvent);
+
+  /* ─── Data loading ─── */
+  const refreshAll = useCallback(async () => {
+    const [scanList, modeList, health, tools, keys, logs] = await Promise.allSettled([
+      api.listScans(),
+      api.getModes(),
+      api.getHealth(),
+      api.getToolsStatus() as Promise<any>,
+      api.getAPIKeysStatus(),
+      api.listLogs(),
+    ]);
+    if (scanList.status === 'fulfilled') {
+      const ordered = orderScans(scanList.value);
+      setScans(ordered);
+      setSelectedScanId(cur => {
+        // If current selection is valid and still in the list, keep it.
+        if (cur && ordered.some(s => s.scan_id === cur)) return cur;
+        // Otherwise pick the first running scan, or most recent.
+        return ordered[0]?.scan_id || null;
+      });
+    }
+    if (modeList.status === 'fulfilled') setModes(modeList.value.modes);
+    if (health.status === 'fulfilled') {
+      setApiHealthy(true);
+      setNvdStats(health.value.nvd);
+    } else {
+      setApiHealthy(false);
+    }
+    if (tools.status === 'fulfilled') {
+      setToolsStatus(tools.value.tools || {});
+      setDockerInfo(tools.value.docker || null);
+      if (tools.value.api_keys) setApiKeyStatus(tools.value.api_keys);
+    }
+    if (keys.status === 'fulfilled') setApiKeyStatus(keys.value);
+    if (logs.status === 'fulfilled') setRuntimeLogs(logs.value.files || []);
+  }, []);
+
+  useEffect(() => {
+    refreshAll()
+      .catch(() => setApiHealthy(false))
+      .finally(() => setLoadingInitial(false));
+  }, [refreshAll]);
+
+  useEffect(() => {
+    if (!selectedScan?.scan_id) return;
+    // Clear stale findings immediately so we don't flash wrong data while loading.
+	    setFindings([]);
+	    setAgentStatus({});
+	    setToolRuns([]);
+	    setCoverage(null);
+	    setLoadingFindings(true);
+	    Promise.allSettled([
+	      api.getFindings(selectedScan.scan_id),
+	      api.getAgentStatus(selectedScan.scan_id),
+	      api.getToolRuns(selectedScan.scan_id),
+	      api.getCoverage(selectedScan.scan_id),
+	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes]) => {
+	      if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value.findings);
+	      if (agentRes.status === 'fulfilled')    setAgentStatus(agentRes.value.agents);
+	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
+	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	    }).finally(() => setLoadingFindings(false));
+  }, [selectedScan?.scan_id]);
+
+  useEffect(() => {
+    if (!selectedScan?.scan_id) return;
+    const loadEvents = () => {
+      api.getEvents(selectedScan.scan_id, 300)
+        .then(r => r.events.forEach(absorbEvent))
+        .catch(() => {});
+    };
+    loadEvents();
+    const iv = setInterval(
+      loadEvents,
+      connected ? 30000 : (selectedScan.status === 'running' ? 3500 : 10000),
+    );
+    return () => clearInterval(iv);
+  }, [selectedScan?.scan_id, selectedScan?.status, connected, absorbEvent]);
+
+	  useEffect(() => {
+	    if (!selectedScan?.scan_id) return;
+	    const loadToolRuns = () => {
+	      Promise.allSettled([
+	        api.getToolRuns(selectedScan.scan_id),
+	        api.getCoverage(selectedScan.scan_id),
+	      ]).then(([toolRunRes, coverageRes]) => {
+	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
+	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	      })
+	        .catch(() => {});
+	    };
+    loadToolRuns();
+    const iv = setInterval(loadToolRuns, selectedScan.status === 'running' ? 7000 : 30000);
+    return () => clearInterval(iv);
+  }, [selectedScan?.scan_id, selectedScan?.status]);
+
+  useEffect(() => {
+    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [logMessages]);
+
+  useEffect(() => {
+    const iv = setInterval(() => refreshAll().catch(() => {}), 30000);
+    return () => clearInterval(iv);
+  }, [refreshAll]);
+
+  useEffect(() => {
+    if (selectedScan?.status !== 'running') return;
+    const iv = setInterval(() => {
+      setLogMessages(prev => [...prev.slice(-299), {
+        msg: `Still running: ${formatPhase(selectedScan.current_phase)} — ${selectedScan.targets?.join(', ') || 'target'}`,
+        level: 'info',
+        time: new Date().toLocaleTimeString(),
+      }]);
+    }, 15000);
+    return () => clearInterval(iv);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedScan?.status, selectedScan?.current_phase, selectedScan?.targets?.join(',')]);
+
+  /* ─── Actions ─── */
+  const startScan = async () => {
+    const targets = targetInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
+    if (!targets.length) return;
+    setStarting(true);
+    try {
+      const result = await api.startScan(targets, scanMode, scanName || `Scan ${new Date().toLocaleDateString()}`);
+      setSelectedScanId(result.scan_id);
+      setFindings([]);
+      setAgentStatus({});
+      setLogMessages([{ msg: `Scan queued for ${targets.join(', ')}`, level: 'success', time: new Date().toLocaleTimeString() }]);
+      setTargetInput('');
+      setScanName('');
+      toast.success('Scan launched', `${targets.join(', ')} is now being assessed`);
+      await refreshAll();
+    } catch (e: any) {
+      toast.error('Failed to start scan', e.message);
+      setLogMessages(prev => [...prev.slice(-199), { msg: `Failed to start: ${e.message}`, level: 'error', time: new Date().toLocaleTimeString() }]);
+    } finally {
+      setStarting(false);
+    }
+  };
+
+  const stopScan = async () => {
+    if (!selectedScan?.scan_id) return;
+    try {
+      await api.stopScan(selectedScan.scan_id);
+      toast.warn('Scan stopped', selectedScan.name);
+      await refreshAll();
+    } catch (e: any) {
+      toast.error('Failed to stop scan', e.message);
+    }
+  };
+
+  const deleteScan = async (scan: Scan, event?: React.SyntheticEvent) => {
+    event?.stopPropagation();
+    if (!scan?.scan_id || scan.status === 'running') return;
+    try {
+      await api.deleteScan(scan.scan_id);
+      toast.success('Scan deleted', scan.name || scan.scan_id);
+      if (selectedScanId === scan.scan_id) {
+        setSelectedScanId(null);
+      }
+      await refreshAll();
+    } catch (e: any) {
+      toast.error('Delete failed', e.message);
+    }
+  };
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refreshAll();
+    } catch (e: any) {
+      toast.error('Refresh failed', e.message);
+    } finally {
+      setTimeout(() => setRefreshing(false), 400);
+    }
+  }, [refreshAll, toast]);
+
+  const toggleFinding = useCallback((key: string) => {
+    setExpandedFindings(prev => {
+      const next = new Set(prev);
+      next.has(key) ? next.delete(key) : next.add(key);
+      return next;
+    });
+  }, []);
+
+  /* ─── Derived values ─── */
+  const severityCounts = useMemo<Record<SeverityKey, number>>(() => {
+    const counts: Record<SeverityKey, number> = { critical: 0, high: 0, medium: 0, low: 0, informational: 0 };
+    if (findings.length) {
+      findings.forEach(f => { counts[f.severity] = (counts[f.severity] || 0) + 1; });
+      return counts;
+    }
+    // Only fall back to scan-list metadata when we're NOT actively loading.
+    // This prevents "Medium 1 / 0 of 0 findings" flash during the fetch.
+    if (selectedScan && !loadingFindings) {
+      counts.critical      = selectedScan.critical_count || 0;
+      counts.high          = selectedScan.high_count     || 0;
+      counts.medium        = selectedScan.medium_count   || 0;
+      counts.low           = selectedScan.low_count      || 0;
+      counts.informational = selectedScan.info_count     || 0;
+    }
+    return counts;
+  }, [findings, selectedScan, loadingFindings]);
+
+  const sortedFindings = useMemo(() => {
+    const order: Record<string, number> = { critical: 0, high: 1, medium: 2, low: 3, informational: 4 };
+    return [...findings].sort((a, b) => {
+      const delta = (order[a.severity] ?? 5) - (order[b.severity] ?? 5);
+      return delta !== 0 ? delta : (b.cvss_score || 0) - (a.cvss_score || 0);
+    });
+  }, [findings]);
+
+  const filteredFindings = useMemo(
+    () => {
+      const bySeverity = severityFilter === 'all' ? sortedFindings : sortedFindings.filter(f => f.severity === severityFilter);
+      return showQuarantined ? bySeverity : bySeverity.filter(f => !f.quarantined);
+    },
+    [severityFilter, sortedFindings, showQuarantined],
+  );
+  const quarantinedCount = useMemo(() => findings.filter(f => f.quarantined).length, [findings]);
+
+  const priorityFindings   = sortedFindings.slice(0, 8);
+  const agentEntries       = useMemo(() => Object.entries(agentStatus), [agentStatus]);
+  const failedToolRuns     = useMemo(() => toolRuns.filter(run => !run.success), [toolRuns]);
+  const totalFindings      = Object.values(severityCounts).reduce((s, v) => s + v, 0);
+  const posture            = riskPosture(severityCounts);
+  const targetCount        = useMemo(() => {
+    const allTargets = new Set(scans.flatMap(s => s.targets || []));
+    if (allTargets.size > 0) return allTargets.size;
+    return targetInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean).length;
+  }, [scans, targetInput]);
+  const agentProgress      = agentEntries.length
+    ? Math.round(agentEntries.reduce((s, [, a]) => s + (a.progress_pct || (a.status === 'completed' ? 100 : 0)), 0) / agentEntries.length)
+    : 0;
+  const activeScans   = scans.filter(s => s.status === 'running').length;
+  const dockerReady   = Boolean(dockerInfo?.daemon_reachable);
+  const toolCounts    = useMemo(() => {
+    const vals = Object.values(toolsStatus);
+    return {
+      docker:   vals.filter((t: any) => t.will_use === 'docker').length,
+      local:    vals.filter((t: any) => t.will_use === 'local').length,
+      internal: vals.filter((t: any) => t.will_use === 'internal').length,
+      needsKey: vals.filter((t: any) => t.will_use === 'needs_api_key').length,
+      pullable: vals.filter((t: any) => t.availability === 'pullable').length,
+      missing:  vals.filter((t: any) => t.availability === 'missing' || t.will_use === 'unavailable').length,
+      total:    vals.length,
+    };
+  }, [toolsStatus]);
+
+  const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
+
+  const visibleLogs: LogMessage[] = logMessages.length ? logMessages : [
+    { msg: connected ? 'SSE stream connected — awaiting events' : 'SSE stream connecting…',  level: connected ? 'success' : 'warn',  time: '—' },
+    { msg: apiHealthy ? 'Backend API healthy' : apiHealthy === false ? 'Backend API unreachable — offline mode' : 'Checking backend API…', level: apiHealthy ? 'success' : apiHealthy === false ? 'error' : 'info', time: '—' },
+    { msg: `${activeModes.length} scan mode(s) loaded`,                                      level: 'info',                           time: '—' },
+    { msg: dockerReady ? 'Docker isolation layer ready' : 'Docker daemon not confirmed',     level: dockerReady ? 'success' : 'warn', time: '—' },
+  ];
+
+  /* ─── Render ────────────────────────────────────────────── */
+  return (
+    <div className="app-shell">
+      {/* Toast notifications */}
+      <ToastContainer toasts={toast.toasts} onDismiss={toast.dismiss} />
+
+      {/* Report download modal */}
+      {showReportModal && selectedScan && (
+        <ReportModal
+          scan={selectedScan}
+          onClose={() => setShowReportModal(false)}
+          onError={msg => toast.error('Download failed', msg)}
+        />
+      )}
+
+      {/* Sidebar — desktop */}
+      <Sidebar
+        activeTab={activeTab}
+        onTabChange={setActiveTab}
+        scanCount={scans.length}
+        findingCount={totalFindings}
+        agentCount={agentEntries.length}
+        toolCount={toolCounts.total}
+        connected={connected}
+        apiHealthy={apiHealthy}
+      />
+
+      {/* Workspace */}
+      <div className="workspace">
+        {/* Header */}
+        <Header
+          apiHealthy={apiHealthy}
+          connected={connected}
+          targetCount={targetCount}
+          refreshing={refreshing}
+          onRefresh={handleRefresh}
+        />
+
+        {/* Mobile tab bar */}
+        <MobileTabBar activeTab={activeTab} onTabChange={setActiveTab} />
+
+        {/* Main content */}
+        <main className="content-area">
+
+          {/* ── DASHBOARD TAB ─────────────────────────────── */}
+          {activeTab === 'dashboard' && (
+            loadingInitial ? <SkeletonDashboard /> : (
+              <div className="dashboard-stack">
+
+                {/* Mission banner */}
+                <section className="mission-banner">
+                  <div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 10 }}>
+                      <span className={`badge ${statusBadgeClass(selectedScan?.status)}`}>
+                        {selectedScan?.status || 'standby'}
+                      </span>
+                      <span style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 11, color: 'var(--text-muted)', alignSelf: 'center' }}>
+                        {selectedScan?.scan_id || 'no-scan-selected'}
+                      </span>
+                      {selectedScan?.current_phase && (
+                        <span style={{
+                          fontSize: 11, padding: '2px 8px', borderRadius: 6,
+                          border: '1px solid var(--accent-border)',
+                          background: 'var(--accent-dim)',
+                          color: 'var(--accent)',
+                        }}>
+                          {formatPhase(selectedScan.current_phase)}
+                        </span>
+                      )}
+                    </div>
+                    <h2 style={{ fontSize: 16, fontWeight: 600, color: 'var(--text-primary)' }}>
+                      {selectedScan?.name || 'Ready to launch assessment'}
+                    </h2>
+                    <p style={{ marginTop: 5, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6, maxWidth: 700 }}>
+                      {selectedScan
+                        ? `${selectedScan.targets?.join(', ')} is under assessment. Agent telemetry, severity drift, and reports update in real time.`
+                        : 'Configure your targets below and launch a scan. The workspace populates with agent progress, live findings, and exportable reports.'}
+                    </p>
+                  </div>
+
+                  <div style={{
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    gap: 4, padding: '10px 14px',
+                    border: '1px solid rgba(255,255,255,0.07)',
+                    borderRadius: 10, background: 'rgba(0,0,0,0.15)', minWidth: 100, textAlign: 'center',
+                  }}>
+                    <div className="section-label">Risk posture</div>
+                    <div style={{
+                      display: 'grid', placeItems: 'center',
+                      width: 52, height: 52, borderRadius: '50%',
+                      border: '1px solid rgba(255,255,255,0.1)',
+                      background: 'rgba(0,0,0,0.18)',
+                      fontFamily: 'var(--font-jetbrains), monospace',
+                      fontSize: '1.1rem', fontWeight: 700,
+                      color: posture.color, fontVariantNumeric: 'tabular-nums',
+                    }}>
+                      {posture.score}
+                    </div>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: posture.color }}>{posture.label}</div>
+                  </div>
+                </section>
+
+                {/* KPI cards */}
+                <section className="kpi-grid">
+                  <MetricCard icon={Activity}      label="Active Scans"  value={activeScans}                  sub={`${scans.length} total`}                      tone="cyan" />
+                  <MetricCard icon={Bug}           label="Total Findings" value={totalFindings}               sub={selectedScan ? selectedScan.name : 'no scan'}  tone="red" />
+                  <MetricCard icon={Boxes}         label="Docker Tools"  value={toolCounts.docker}             sub={dockerReady ? 'daemon reachable' : 'not confirmed'} tone="emerald" />
+                  <MetricCard icon={Gauge}         label="NVD Lookups"   value={nvdStats?.total_lookups || 0} sub={`${nvdStats?.verified || 0} verified`}          tone="amber" />
+                </section>
+
+                {/* Workbench */}
+                <section className="dashboard-workbench">
+                  {/* Launch panel */}
+                  <LaunchPanel
+                    targetInput={targetInput}
+                    setTargetInput={setTargetInput}
+                    scanMode={scanMode}
+                    setScanMode={setScanMode}
+                    scanName={scanName}
+                    setScanName={setScanName}
+                    activeModes={activeModes}
+                    selectedMode={selectedMode}
+                    starting={starting}
+                    onStart={startScan}
+                    onRefresh={handleRefresh}
+                    refreshing={refreshing}
+                  />
+
+                  {/* Right side operations */}
+                  <div className="operations-grid">
+                    {/* Engagement timeline + findings + agents */}
+                    <div className="card-glass" style={{ padding: 16 }}>
+                      {/* Header */}
+                      <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
+                        <div>
+                          <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Engagement Timeline</h2>
+                          <p style={{ marginTop: 3, fontSize: 12, color: 'var(--text-secondary)' }}>
+                            {selectedScan ? `${selectedScan.targets?.join(', ')} — ${formatAge(selectedScan.start_time)}` : 'No active engagement'}
+                          </p>
+                        </div>
+                        {selectedScan && (
+                          <div style={{ display: 'flex', gap: 8 }}>
+                            {selectedScan.status === 'running' && (
+                              <button onClick={stopScan} className="btn btn-danger">
+                                <CircleStop size={14} />Stop
+                              </button>
+                            )}
+                            <button onClick={() => setShowReportModal(true)} className="btn btn-secondary">
+                              <Download size={14} />Report
+                            </button>
+                            {selectedScan.status !== 'running' && (
+                              <button onClick={(event) => deleteScan(selectedScan, event)} className="btn btn-secondary" title="Delete scan">
+                                <Trash2 size={14} />Delete
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Severity overview */}
+                      <div className="severity-overview">
+                        <SeverityDonut counts={severityCounts} total={totalFindings} />
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(70px, 1fr))', gap: 8 }}>
+                          {SEVERITIES.map(sev => (
+                            <div
+                              key={sev}
+                              className="severity-card-mini"
+                              style={{ borderColor: `${SEV_HEX[sev]}55`, background: `${SEV_HEX[sev]}0d` }}
+                            >
+                              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 4 }}>
+                                <span style={{ width: 7, height: 7, borderRadius: '50%', background: SEV_HEX[sev], flexShrink: 0, display: 'block' }} aria-hidden="true" />
+                                <span style={{
+                                  fontFamily: 'var(--font-jetbrains), monospace',
+                                  fontSize: 18, fontWeight: 700,
+                                  color: SEV_HEX[sev],
+                                  fontVariantNumeric: 'tabular-nums',
+                                }}>
+                                  {severityCounts[sev]}
+                                </span>
+                              </div>
+                              <div style={{ marginTop: 4, fontSize: 10, textTransform: 'capitalize', color: 'var(--text-secondary)' }}>
+                                {sev === 'informational' ? 'info' : sev}
+                              </div>
+                              <div style={{ marginTop: 6, height: 3, borderRadius: 2, background: 'rgba(0,0,0,0.25)', overflow: 'hidden' }}>
+                                <div style={{
+                                  height: '100%', borderRadius: 2, background: SEV_HEX[sev],
+                                  width: `${totalFindings ? (severityCounts[sev] / totalFindings) * 100 : 0}%`,
+                                  transition: 'width 400ms ease',
+                                }} />
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+
+                      {/* Phase steps */}
+                      <div className="phase-grid">
+                        {PHASE_ORDER.map((phase, i) => {
+                          const active = selectedScan?.current_phase === phase;
+                          const done   = currentPhaseIndex > i || selectedScan?.status === 'completed';
+                          return (
+                            <div key={phase} className={`phase-step${active ? ' active' : done ? ' done' : ''}`}>
+                              <span className="phase-num">
+                                {done ? <CheckCircle2 size={11} aria-hidden="true" /> : i + 1}
+                              </span>
+                              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontSize: 11 }}>
+                                {formatPhase(phase)}
+                              </span>
+                            </div>
+                          );
+                        })}
+                      </div>
+
+                      {/* Scan list */}
+                      <div style={{ maxHeight: 200, overflowY: 'auto', display: 'grid', gap: 6, marginBottom: 14 }}>
+                        {scans.length === 0 ? (
+                          <EmptyState icon={Shield} title="No scans yet" body="Launch your first VA scan from the Launch panel." />
+                        ) : (
+                          scans.map(scan => (
+                            <div
+                              key={scan.scan_id}
+                              role="button"
+                              tabIndex={0}
+                              onClick={() => setSelectedScanId(scan.scan_id)}
+                              onKeyDown={(event) => {
+                                if (event.key === 'Enter' || event.key === ' ') setSelectedScanId(scan.scan_id);
+                              }}
+                              className={`scan-row${selectedScan?.scan_id === scan.scan_id ? ' selected' : ''}`}
+                            >
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontSize: 13, fontWeight: 500, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
+                                  {scan.name || scan.scan_id}
+                                </div>
+                                <div style={{ marginTop: 3, fontSize: 11, color: 'var(--text-secondary)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontFamily: 'var(--font-jetbrains), monospace' }}>
+                                  {scan.targets?.join(', ')} · {scan.mode}
+                                </div>
+                              </div>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                                <span className={`badge ${statusBadgeClass(scan.status)}`}>{scan.status}</span>
+                                {scan.status !== 'running' && (
+                                  <button
+                                    type="button"
+                                    tabIndex={0}
+                                    onClick={(event) => deleteScan(scan, event)}
+                                    className="icon-button"
+                                    title="Delete scan"
+                                  >
+                                    <Trash2 size={13} aria-hidden="true" />
+                                  </button>
+                                )}
+                                <ChevronRight size={14} style={{ color: 'var(--text-muted)' }} aria-hidden="true" />
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+
+                      {/* Priority findings + agent state */}
+                      <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 280px', gap: 14 }}>
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
+                            <span className="section-label">Priority Findings</span>
+                            <button
+                              onClick={() => setActiveTab('findings')}
+                              style={{ fontSize: 11, color: 'var(--accent)', background: 'none', border: 'none', cursor: 'pointer', fontWeight: 500 }}
+                            >
+                              View all →
+                            </button>
+                          </div>
+                          {priorityFindings.length === 0 ? (
+                            <div className="quiet-empty">No findings for selected scan.</div>
+                          ) : (
+                            <div>
+                              {priorityFindings.map((f, i) => (
+                                <div key={`${f.title}-${f.target_host}-${i}`} className="finding-strip">
+                                  <span className="sev-dot" style={{ background: SEV_DOT_COLOR[f.severity] || '#06b6d4' }} aria-hidden="true" />
+                                  <div style={{ minWidth: 0, flex: 1 }}>
+                                    <div style={{ fontSize: 12, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>{f.title}</div>
+                                    <div style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-jetbrains), monospace', marginTop: 2 }}>
+                                      {f.target_display || `${f.target_host}:${f.target_port}`} · {f.agent_source}
+                                    </div>
+                                  </div>
+                                  <span className={`badge ${SEV_BADGE_CLASS[f.severity] || 'badge-informational'}`}>
+                                    {f.severity === 'informational' ? 'info' : f.severity}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+
+                        <div style={{ borderLeft: '1px solid var(--border)', paddingLeft: 14 }}>
+                          <span className="section-label" style={{ display: 'block', marginBottom: 10 }}>Agent State</span>
+                          {agentEntries.length === 0 ? (
+                            <div className="quiet-empty">Agents appear when a scan starts.</div>
+                          ) : (
+                            <div>
+                              {agentEntries.map(([name, status]) => (
+                                <div key={name} className="agent-line">
+                                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                                    <span style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
+                                      {name}
+                                    </span>
+                                    <span className={`badge ${agentBadgeClass(status.status)}`}>{status.status}</span>
+                                  </div>
+                                  <div className="progress-bar" style={{ marginTop: 6 }}>
+                                    <div className="progress-fill" style={{ width: `${status.progress_pct || (status.status === 'completed' ? 100 : 0)}%` }} />
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Live feed */}
+                    <LiveFeed logs={visibleLogs} logRef={logRef} selectedScan={selectedScan} />
+                  </div>
+                </section>
+              </div>
+            )
+          )}
+
+          {/* ── FINDINGS TAB ──────────────────────────────── */}
+          {activeTab === 'findings' && (
+            <section>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <ShieldAlert size={20} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+                  <div>
+                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Findings</h2>
+                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                      {filteredFindings.length} of {findings.length} findings
+                    </p>
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button onClick={handleRefresh} disabled={refreshing} className="btn btn-secondary">
+                    <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />
+                    Refresh
+                  </button>
+                  {selectedScan && (
+                    <button onClick={() => setShowReportModal(true)} className="btn btn-secondary">
+                      <FileText size={14} aria-hidden="true" />Report
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Severity filter bar */}
+              <div className="sev-filter-bar" style={{ marginBottom: 14 }} role="group" aria-label="Filter by severity">
+                {SEVERITY_FILTERS.map(f => {
+                  const count = f === 'all' ? findings.length : severityCounts[f as SeverityKey];
+                  return (
+                    <button
+                      key={f}
+                      onClick={() => setSeverityFilter(f)}
+                      className={`sev-filter-btn${severityFilter === f ? ' active' : ''}`}
+                      aria-pressed={severityFilter === f}
+                    >
+                      {f !== 'all' && (
+                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: SEV_DOT_COLOR[f] || '#06b6d4', display: 'inline-block', flexShrink: 0 }} aria-hidden="true" />
+                      )}
+                      {severityLabel(f)}
+                      <span className="sev-filter-count">{count}</span>
+                    </button>
+                  );
+                })}
+                {quarantinedCount > 0 && (
+                  <button
+                    onClick={() => setShowQuarantined(v => !v)}
+                    className={`sev-filter-btn${showQuarantined ? ' active' : ''}`}
+                    aria-pressed={showQuarantined}
+                    title="Low-evidence findings excluded from reports"
+                    style={{ marginLeft: 'auto' }}
+                  >
+                    {showQuarantined ? 'Hiding' : 'Show'} quarantined
+                    <span className="sev-filter-count">{quarantinedCount}</span>
+                  </button>
+                )}
+              </div>
+
+              {/* Finding list */}
+              {loadingFindings ? (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {Array.from({ length: 5 }).map((_, i) => <SkeletonFindingCard key={i} />)}
+                </div>
+              ) : findings.length === 0 ? (
+                <EmptyState icon={ShieldCheck} title="No findings loaded" body="Select a completed scan or wait for a scan in progress to surface issues." />
+              ) : filteredFindings.length === 0 ? (
+                <EmptyState icon={Info} title="No matching findings" body={`No findings match the "${severityLabel(severityFilter)}" filter.`} />
+              ) : (
+                <div style={{ display: 'grid', gap: 8 }}>
+                  {filteredFindings.map((f, i) => {
+                    const key      = `${f.title}|${f.target_host}|${f.created_at || i}`;
+                    const expanded = expandedFindings.has(key);
+                    return (
+                      <FindingCard
+                        key={key}
+                        finding={f}
+                        expanded={expanded}
+                        onToggle={() => toggleFinding(key)}
+                      />
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── AGENTS TAB ────────────────────────────────── */}
+          {activeTab === 'agents' && (
+            <section>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <Bot size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                  <div>
+                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Agent Roster</h2>
+                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                      {agentEntries.length} agents · {agentProgress}% avg progress
+                    </p>
+                  </div>
+                </div>
+                {agentEntries.length > 0 && (
+                  <span style={{
+                    fontFamily: 'var(--font-jetbrains), monospace', fontSize: 11,
+                    padding: '4px 10px', borderRadius: 6,
+                    border: '1px solid var(--accent-border)',
+                    background: 'var(--accent-dim)',
+                    color: 'var(--accent)',
+                  }}>
+                    {agentProgress}% complete
+                  </span>
+                )}
+              </div>
+
+              {!selectedScan ? (
+                <EmptyState icon={Bot} title="No scan selected" body="Agent status appears once an engagement starts." />
+              ) : loadingInitial ? (
+                <div className="agents-grid">
+                  {Array.from({ length: 6 }).map((_, i) => <SkeletonAgentCard key={i} />)}
+                </div>
+              ) : agentEntries.length === 0 ? (
+                <EmptyState icon={Activity} title="Agents waiting" body="The roster populates as the backend dispatches work." />
+              ) : (
+                <div style={{ display: 'grid', gap: 16 }}>
+	                  <div className="agents-grid">
+	                    {agentEntries.map(([name, status], index) => (
+	                      <AgentCard key={name} name={name} status={status} index={index} />
+	                    ))}
+	                  </div>
+
+	                  {coverage && (
+	                    <div className="card-glass" style={{ padding: 14 }}>
+	                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+	                        <div>
+	                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Coverage</h3>
+	                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+	                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} blind spots
+	                          </p>
+	                        </div>
+	                        <span className={`badge ${(coverage.summary.blind_spots || 0) ? 'badge-failed' : 'badge-completed'}`}>
+	                          {(coverage.summary.blind_spots || 0) ? 'attention' : 'covered'}
+	                        </span>
+	                      </div>
+	                      <div className="coverage-list">
+	                        {coverage.checks.slice(0, 9).map(check => (
+	                          <div key={check.id} className="coverage-row">
+	                            <div style={{ minWidth: 0 }}>
+	                              <div className="coverage-title">{check.label}</div>
+	                              <div className="coverage-meta">
+	                                {check.phase} · {(check.successful_tools?.length ? check.successful_tools : check.tools_observed || check.expected_tools || []).join(', ') || 'no tool evidence'}
+	                              </div>
+	                            </div>
+	                            <span className={`badge ${check.status === 'completed' ? 'badge-completed' : check.status === 'running' ? 'badge-running' : 'badge-idle'}`}>
+	                              {check.status.replaceAll('_', ' ')}
+	                            </span>
+	                          </div>
+	                        ))}
+	                      </div>
+	                    </div>
+	                  )}
+
+	                  <div className="card-glass" style={{ padding: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                      <div>
+                        <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Runs</h3>
+                        <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                          {toolRuns.length} captured · {failedToolRuns.length} failed
+                        </p>
+                      </div>
+                      <button
+                        onClick={() => selectedScan?.scan_id && api.getToolRuns(selectedScan.scan_id).then(r => setToolRuns(r.tool_runs)).catch(() => {})}
+                        className="btn btn-secondary"
+                      >
+                        <RefreshCw size={14} aria-hidden="true" />Refresh
+                      </button>
+                    </div>
+                    {toolRuns.length === 0 ? (
+                      <div className="quiet-empty">Tool output appears after agents finish their current phase.</div>
+                    ) : (
+                      <div className="tool-run-list">
+                        {[...toolRuns].sort((a, b) => Number(a.success) - Number(b.success) || b.id - a.id).slice(0, 80).map(run => {
+                          const snippet = run.stderr_snippet || run.stdout_snippet || '';
+                          return (
+                            <div key={run.id} className={`tool-run-row${run.success ? '' : ' failed'}`}>
+	                              <div className="tool-run-head">
+	                                <span className="tool-run-name">{run.tool}</span>
+	                                <div className="tool-run-actions">
+	                                  {run.stdout_artifact_url && (
+	                                    <a className="tool-run-link" href={api.downloadToolArtifact(selectedScan.scan_id, run.id, 'stdout')} title="Download stdout">
+	                                      <Download size={12} aria-hidden="true" />stdout
+	                                    </a>
+	                                  )}
+	                                  {run.stderr_artifact_url && (
+	                                    <a className="tool-run-link" href={api.downloadToolArtifact(selectedScan.scan_id, run.id, 'stderr')} title="Download stderr">
+	                                      <Download size={12} aria-hidden="true" />stderr
+	                                    </a>
+	                                  )}
+	                                  <span className={`badge ${run.success ? 'badge-completed' : 'badge-failed'}`}>
+	                                    {run.success ? 'ok' : `exit ${run.exit_code}`}
+	                                  </span>
+	                                </div>
+	                              </div>
+	                              <div className="tool-run-meta">
+	                                {run.agent_type} · {run.phase || 'phase'} · {Math.round((run.duration || 0) * 10) / 10}s · stdout {run.stdout_size || 0}b · stderr {run.stderr_size || 0}b
+	                              </div>
+                              {run.command_preview && (
+                                <pre className="tool-run-snippet" style={{ borderColor: 'rgba(34,211,238,0.18)' }}>
+                                  {run.command_preview.slice(0, 900)}
+                                </pre>
+                              )}
+                              {snippet && <pre className="tool-run-snippet">{snippet.slice(0, 900)}</pre>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── TOOLS TAB ─────────────────────────────────── */}
+          {activeTab === 'tools' && (
+            <section>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
+                <Wrench size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                <div>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Readiness</h2>
+                  <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
+                    {toolCounts.total} tools configured
+                  </p>
+                </div>
+              </div>
+
+              {/* Metric cards */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
+                <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
+                <MetricCard icon={Server}        label="Ready / Pullable"  value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.pullable} sub={`${toolCounts.total} configured`} tone="cyan" />
+                <MetricCard icon={AlertTriangle} label="Unavailable"       value={toolCounts.missing} sub={`${toolCounts.needsKey} need API keys`} tone={toolCounts.missing ? 'red' : 'emerald'} />
+              </div>
+
+              {/* API key panels */}
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
+                {API_KEY_GROUPS.map(({ label, keys }) => {
+                  const groupKey = label.toLowerCase();
+                  const statuses = apiKeyStatus?.groups?.[groupKey] || keys.map(name => ({ name, configured: false, storage: '.env / docker compose environment' }));
+                  const summary = apiKeyStatus?.summary?.[groupKey];
+                  return (
+                  <div key={label} className="card-glass" style={{ padding: 14 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                        <Lock size={13} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
+                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>{label} API Keys</span>
+                      </div>
+                      <span className="badge badge-idle">
+                        {summary ? `${summary.configured}/${summary.total}` : 'check'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {statuses.map(k => (
+                        <span key={k.name} style={{
+                          fontFamily: 'var(--font-jetbrains), monospace', fontSize: 10,
+                          padding: '3px 8px', borderRadius: 5,
+                          border: k.configured ? '1px solid rgba(34,197,94,0.35)' : '1px solid var(--border)',
+                          background: k.configured ? 'rgba(34,197,94,0.09)' : 'var(--bg-elevated)',
+                          color: k.configured ? 'var(--low)' : 'var(--text-secondary)',
+                        }}>
+                          {k.name}{k.configured ? ' ✓' : ''}
+                        </span>
+                      ))}
+                    </div>
+                    <p style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
+                      Stored in Compose environment from <code style={{ fontFamily: 'var(--font-jetbrains), monospace' }}>.env</code>. Values are never returned by the API.
+                    </p>
+                  </div>
+                )})}
+              </div>
+
+              <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
+                  <div>
+                    <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Runtime Logs</h3>
+                    <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                      {runtimeLogs.length} file{runtimeLogs.length === 1 ? '' : 's'} available
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => api.listLogs().then(r => setRuntimeLogs(r.files || [])).catch(() => {})}
+                    className="btn btn-secondary"
+                  >
+                    <RefreshCw size={14} aria-hidden="true" />Refresh
+                  </button>
+                </div>
+                {runtimeLogs.length === 0 ? (
+                  <div className="quiet-empty">Runtime log file appears after the rebuilt containers start.</div>
+                ) : (
+                  <div style={{ display: 'grid', gap: 8 }}>
+                    {runtimeLogs.slice(0, 6).map(file => (
+                      <a
+                        key={file.name}
+                        className="tool-row"
+                        href={api.downloadLog(file.name)}
+                        target="_blank"
+                        rel="noreferrer"
+                        style={{ textDecoration: 'none' }}
+                      >
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, color: 'var(--text-primary)' }}>{file.name}</div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
+                            {(file.size / 1024).toFixed(1)} KB · {formatAge(file.modified_at)}
+                          </div>
+                        </div>
+                        <span className="badge badge-informational">download</span>
+                      </a>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Tools grid */}
+              {Object.keys(toolsStatus).length === 0 ? (
+                <EmptyState icon={Wrench} title="No tool data" body="Backend must be reachable to report tool status." />
+              ) : (
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
+                  {Object.entries(toolsStatus).map(([name, tool]) => {
+                    const wu           = tool.will_use as string;
+                    const availability = tool.availability as string || wu;
+                    const isOk         = wu === 'docker' || wu === 'local' || wu === 'internal' || wu === 'api';
+                    const isPullable   = availability === 'pullable';
+                    const isMissing    = availability === 'missing' || wu === 'unavailable';
+                    const needsKey     = wu === 'needs_api_key';
+                    return (
+                      <div key={name} className="tool-row">
+                        <div style={{ minWidth: 0 }}>
+                          <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
+                            {tool.display_name || name}
+                          </div>
+                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {(tool.phases || []).slice(0, 2).join(', ') || tool.docker_image || 'local command'}
+                          </div>
+                        </div>
+                        <span className={`badge ${
+                          wu === 'docker' ? 'badge-informational' :
+                          isPullable      ? 'badge-running' :
+                          isOk            ? 'badge-completed' :
+                          needsKey        ? 'badge-running' :
+                          isMissing       ? 'badge-failed' : 'badge-idle'
+                        }`}>
+                          {isMissing ? 'missing' : needsKey ? 'needs key' : isPullable ? 'pullable' : wu}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </section>
+          )}
+
+        </main>
+      </div>
+    </div>
+  );
+}
+
+/* ─── agentBadgeClass helper (local) ─── */
+function agentBadgeClass(status?: string) {
+  if (status === 'running')   return 'badge-running';
+  if (status === 'completed') return 'badge-completed';
+  if (status === 'failed' || status === 'cancelled') return 'badge-failed';
+  if (status === 'skipped')   return 'badge-skipped';
+  return 'badge-idle';
+}
+
+/* ─── LaunchPanel (inline — tightly coupled to page state) ─── */
+interface LaunchPanelProps {
+  targetInput: string;
+  setTargetInput: (v: string) => void;
+  scanMode: string;
+  setScanMode: (v: string) => void;
+  scanName: string;
+  setScanName: (v: string) => void;
+  activeModes: ScanMode[];
+  selectedMode: ScanMode;
+  starting: boolean;
+  onStart: () => void;
+  onRefresh: () => void;
+  refreshing: boolean;
+}
+
+function LaunchPanel({
+  targetInput, setTargetInput,
+  scanMode, setScanMode,
+  scanName, setScanName,
+  activeModes, selectedMode,
+  starting, onStart,
+  onRefresh, refreshing,
+}: LaunchPanelProps) {
+  return (
+    <div className="card-glass launch-panel" style={{ padding: 16 }}>
+      {/* Title + exploit badge */}
+      <div style={{ marginBottom: 14 }}>
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 }}>
+          <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Launch Scan</h2>
+          <span style={{
+            fontSize: 10, padding: '2px 8px', borderRadius: 6, fontWeight: 600,
+            border: selectedMode.exploit ? '1px solid rgba(244,63,94,0.35)' : '1px solid rgba(34,197,94,0.35)',
+            background: selectedMode.exploit ? 'rgba(244,63,94,0.09)' : 'rgba(34,197,94,0.09)',
+            color: selectedMode.exploit ? 'var(--critical)' : 'var(--low)',
+          }}>
+            {selectedMode.exploit ? 'EXPLOIT ON' : 'VA SAFE'}
+          </span>
+        </div>
+        <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{selectedMode.description}</p>
+      </div>
+
+      <div style={{ display: 'grid', gap: 12 }}>
+        <label>
+          <div className="section-label" style={{ marginBottom: 6 }}>Targets</div>
+          <textarea
+            value={targetInput}
+            onChange={e => setTargetInput(e.target.value)}
+            placeholder={"example.com, 10.0.0.1\n192.168.1.0/24"}
+            rows={4}
+            className="field"
+            aria-label="Targets (comma or newline separated)"
+            style={{ resize: 'none', minHeight: 90, fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12 }}
+          />
+        </label>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
+          <label>
+            <div className="section-label" style={{ marginBottom: 6 }}>Mode</div>
+            <select value={scanMode} onChange={e => setScanMode(e.target.value)} className="field" style={{ height: 36 }}>
+              {activeModes.map(m => <option key={m.id} value={m.id}>{m.name}</option>)}
+            </select>
+          </label>
+          <label>
+            <div className="section-label" style={{ marginBottom: 6 }}>Name</div>
+            <input
+              value={scanName}
+              onChange={e => setScanName(e.target.value)}
+              placeholder="Q3 external"
+              className="field"
+              style={{ height: 36 }}
+              aria-label="Scan name"
+            />
+          </label>
+        </div>
+
+        {/* Agent pipeline preview */}
+        <div style={{
+          borderRadius: 8, border: '1px solid var(--border)',
+          background: 'rgba(0,0,0,0.12)', padding: '10px 12px',
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
+            <span className="section-label">Agent pipeline</span>
+            <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-jetbrains), monospace' }}>
+              {selectedMode.agents.length} agents
+            </span>
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            {selectedMode.agents.map((agent, i) => (
+              <span key={agent} style={{
+                fontFamily: 'var(--font-jetbrains), monospace', fontSize: 10,
+                padding: '3px 7px', borderRadius: 5,
+                border: '1px solid var(--border)',
+                background: i === 0 ? 'var(--accent-dim)' : 'var(--bg-elevated)',
+                color: i === 0 ? 'var(--accent)' : 'var(--text-secondary)',
+              }}>
+                {agent}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button
+            onClick={onStart}
+            disabled={starting || !targetInput.trim()}
+            className="btn btn-primary"
+            style={{ flex: 1 }}
+          >
+            {starting ? <RefreshCw size={15} className="animate-spin" aria-hidden="true" /> : <Play size={15} aria-hidden="true" />}
+            {starting ? 'Starting…' : 'Launch Scan'}
+          </button>
+          <button onClick={onRefresh} disabled={refreshing} className="btn btn-icon" title="Refresh data" aria-label="Refresh data">
+            <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}

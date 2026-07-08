@@ -1,0 +1,30 @@
+'use client';
+
+import { Bot, LayoutDashboard, ShieldAlert, Wrench } from 'lucide-react';
+
+type Tab = 'dashboard' | 'findings' | 'agents' | 'tools';
+
+const TABS = [
+  { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Dash' },
+  { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Finds' },
+  { tab: 'agents'    as Tab, icon: Bot,             label: 'Agents' },
+  { tab: 'tools'     as Tab, icon: Wrench,          label: 'Tools' },
+] as const;
+
+export function MobileTabBar({ activeTab, onTabChange }: { activeTab: Tab; onTabChange: (tab: Tab) => void }) {
+  return (
+    <nav className="mobile-tabs lg:hidden flex items-center" aria-label="Mobile navigation">
+      {TABS.map(({ tab, icon: Icon, label }) => (
+        <button
+          key={tab}
+          onClick={() => onTabChange(tab)}
+          className={`mobile-tab-item${activeTab === tab ? ' active' : ''}`}
+          aria-current={activeTab === tab ? 'page' : undefined}
+        >
+          <Icon size={18} aria-hidden="true" />
+          <span>{label}</span>
+        </button>
+      ))}
+    </nav>
+  );
+}
