@@ -39,62 +39,62 @@ class CloudAgent(BaseAgent):
         super().__init__(AgentType.CLOUD, scope, config)
         self._runner = DockerRunner(config)
 
-        async def execute(self, task: AgentTask) -> list[Finding]:
-            logger.info("[CLOUD] Starting cloud security assessment")
-            self.clear_findings()
-            self.clear_tool_runs()
+    async def execute(self, task: AgentTask) -> list[Finding]:
+        logger.info("[CLOUD] Starting cloud security assessment")
+        self.clear_findings()
+        self.clear_tool_runs()
 
-            domain = task.target.host
-            recon_data = task.parameters.get("recon_data", task.result or {})
-            subdomains = recon_data.get("subdomains", [])
-            live_urls = recon_data.get("live_urls", [])
+        domain = task.target.host
+        recon_data = task.parameters.get("recon_data", task.result or {})
+        subdomains = recon_data.get("subdomains", [])
+        live_urls = recon_data.get("live_urls", [])
 
-            # Phase 1: DNS Record Analysis
-            await self._analyze_dns_records(domain)
-            await self._check_email_security(domain)
+        # Phase 1: DNS Record Analysis
+        await self._analyze_dns_records(domain)
+        await self._check_email_security(domain)
 
-            # Phase 2: Cloud Provider Fingerprinting
-            cloud_assets = await self._fingerprint_cloud_infrastructure(domain, live_urls, subdomains)
+        # Phase 2: Cloud Provider Fingerprinting
+        cloud_assets = await self._fingerprint_cloud_infrastructure(domain, live_urls, subdomains)
 
-            # Phase 3: S3 / Cloud Storage Checks
-            s3_candidates_checked = await self._check_cloud_storage(domain, subdomains)
+        # Phase 3: S3 / Cloud Storage Checks
+        s3_candidates_checked = await self._check_cloud_storage(domain, subdomains)
 
-            # Phase 4: SecurityTrails Integration
-            await self._query_securitytrails(domain)
+        # Phase 4: SecurityTrails Integration
+        await self._query_securitytrails(domain)
 
-            # Phase 5: Cloud Metadata Checks on discovered endpoints
-            for entry in live_urls[:10]:
-                url = entry.get("url", "")
-                if url and self.is_in_scope(url):
-                    await self._check_cloud_metadata(url)
+        # Phase 5: Cloud Metadata Checks on discovered endpoints
+        for entry in live_urls[:10]:
+            url = entry.get("url", "")
+            if url and self.is_in_scope(url):
+                await self._check_cloud_metadata(url)
 
-            # Phase 6: Azure/GCP specific checks
-            await self._check_azure_resources(domain, subdomains)
-            await self._check_gcp_resources(domain, subdomains)
+        # Phase 6: Azure/GCP specific checks
+        await self._check_azure_resources(domain, subdomains)
+        await self._check_gcp_resources(domain, subdomains)
 
-            task.result = {
-                "cloud_assets": cloud_assets,
-                "total_cloud_findings": len(self._findings),
-                "coverage": {
-                    "cloud_s3_storage": {
-                        "status": "completed",
-                        "candidates_checked": s3_candidates_checked,
-                        "method": "cloud_agent_http_bucket_checks",
-                        "notes": "S3 candidates were actively checked for public bucket listing responses.",
-                    },
-                    "azure_storage": {
-                        "status": "completed",
-                        "method": "cloud_agent_http_blob_checks",
-                    },
-                    "gcp_storage": {
-                        "status": "completed",
-                        "method": "cloud_agent_http_storage_checks",
-                    },
+        task.result = {
+            "cloud_assets": cloud_assets,
+            "total_cloud_findings": len(self._findings),
+            "coverage": {
+                "cloud_s3_storage": {
+                    "status": "completed",
+                    "candidates_checked": s3_candidates_checked,
+                    "method": "cloud_agent_http_bucket_checks",
+                    "notes": "S3 candidates were actively checked for public bucket listing responses.",
                 },
-            }
+                "azure_storage": {
+                    "status": "completed",
+                    "method": "cloud_agent_http_blob_checks",
+                },
+                "gcp_storage": {
+                    "status": "completed",
+                    "method": "cloud_agent_http_storage_checks",
+                },
+            },
+        }
 
-            logger.info("[CLOUD] Complete: {count} cloud findings", count=len(self._findings))
-            return self.get_findings()
+        logger.info("[CLOUD] Complete: {count} cloud findings", count=len(self._findings))
+        return self.get_findings()
 
     async def _analyze_dns_records(self, domain: str) -> None:
         """Analyze DNS records for security issues."""
@@ -257,28 +257,27 @@ class CloudAgent(BaseAgent):
 
         return cloud_assets
 
-        def _load_s3_wordlist_candidates(self, domain: str) -> list[str]:
-            wordlist_dir = os.environ.get("VAPT_WORDLIST_DIR", "/app/wordlists")
-            path = os.path.join(wordlist_dir, "s3-buckets.txt")
-            root = domain.split(".")[0]
-            candidates: list[str] = []
-            try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
-                    for line in handle:
-                        item = line.strip()
-                        if not item or item.startswith("#"):
-                            continue
-                        candidates.append(
-                            item.format(domain=domain, root=root).replace("..", ".")
-                        )
-            except OSError:
-                return []
-            return candidates
+    def _load_s3_wordlist_candidates(self, domain: str) -> list[str]:
+        wordlist_dir = os.environ.get("VAPT_WORDLIST_DIR", "/app/wordlists")
+        path = os.path.join(wordlist_dir, "s3-buckets.txt")
+        root = domain.split(".")[0]
+        candidates: list[str] = []
+        try:
+            with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                for line in handle:
+                    item = line.strip()
+                    if not item or item.startswith("#"):
+                        continue
+                    candidates.append(
+                        item.format(domain=domain, root=root).replace("..", ".")
+                    )
+        except OSError:
+            return []
+        return candidates
 
-        async def _check_cloud_storage(self, domain: str, subdomains: list[str]) -> int:
-            """Check for exposed S3 buckets and cloud storage."""
-            # S3 bucket naming patterns
-            bucket_names = [
+    async def _check_cloud_storage(self, domain: str, subdomains: list[str]) -> int:
+        """Check for exposed S3 buckets and cloud storage."""
+        bucket_names = [
             domain.replace(".", "-"),
             domain.replace(".", ""),
             f"{domain.split('.')[0]}-assets",
@@ -290,47 +289,47 @@ class CloudAgent(BaseAgent):
             f"{domain.split('.')[0]}-public",
             f"{domain.split('.')[0]}-private",
             f"{domain.split('.')[0]}-staging",
-                f"{domain.split('.')[0]}-prod",
-                f"{domain.split('.')[0]}-dev",
-            ]
-            bucket_names.extend(self._load_s3_wordlist_candidates(domain))
+            f"{domain.split('.')[0]}-prod",
+            f"{domain.split('.')[0]}-dev",
+        ]
+        bucket_names.extend(self._load_s3_wordlist_candidates(domain))
 
         # Check for S3 bucket patterns in subdomains
         for sub in subdomains:
             if "s3" in sub.lower() or "bucket" in sub.lower() or "storage" in sub.lower():
                 bucket_names.append(sub)
 
-            unique_buckets = list(dict.fromkeys(bucket_names))
-            checked = 0
+        unique_buckets = list(dict.fromkeys(bucket_names))
+        checked = 0
+        async with httpx_client.AsyncClient(timeout=8, follow_redirects=True) as client:
             for bucket in unique_buckets[:50]:
                 try:
-                    async with httpx_client.AsyncClient(timeout=8, follow_redirects=True) as client:
-                        # Check bucket via virtual-hosted style
-                        checked += 1
-                        resp = await client.get(f"http://{bucket}.s3.amazonaws.com/")
-                    if resp.status_code == 200:
-                        if "ListBucketResult" in resp.text:
-                            finding = Finding(
-                                title=f"Public S3 Bucket: {bucket}",
-                                description=f"An S3 bucket named '{bucket}' is publicly accessible and allows listing. "
-                                            f"This could expose sensitive files, backups, or user data to anyone on the internet.",
-                                severity=Severity.CRITICAL,
-                                cvss_score=9.1,
-                                agent_source=AgentType.CLOUD,
-                                target=Target(host=f"{bucket}.s3.amazonaws.com"),
-                                evidence=f"HTTP 200 — Bucket listing enabled\n{resp.text[:500]}",
-                                remediation="Set the S3 bucket ACL to private. Implement bucket policies "
-                                            "that deny public access. Enable server-side encryption. "
-                                            "Use IAM policies for access control.",
-                                cwe_ids=["CWE-312", "CWE-200"],
-                                tags=["s3", "cloud-storage", "exposure", "aws", "data-leak"],
-                                confidence="high",
-                                status="confirmed",
-                            )
-                            self._add_finding(finding)
+                    checked += 1
+                    resp = await client.get(f"http://{bucket}.s3.amazonaws.com/")
+                    if resp.status_code == 200 and "ListBucketResult" in resp.text:
+                        finding = Finding(
+                            title=f"Public S3 Bucket: {bucket}",
+                            description=f"An S3 bucket named '{bucket}' is publicly accessible and allows listing. "
+                                        f"This could expose sensitive files, backups, or user data to anyone on the internet.",
+                            severity=Severity.CRITICAL,
+                            cvss_score=9.1,
+                            agent_source=AgentType.CLOUD,
+                            target=Target(host=f"{bucket}.s3.amazonaws.com"),
+                            evidence=f"HTTP 200 — Bucket listing enabled\n{resp.text[:500]}",
+                            request_proof=f"GET http://{bucket}.s3.amazonaws.com/",
+                            response_proof=f"HTTP 200\n{resp.text[:1000]}",
+                            remediation="Set the S3 bucket ACL to private. Implement bucket policies "
+                                        "that deny public access. Enable server-side encryption. "
+                                        "Use IAM policies for access control.",
+                            cwe_ids=["CWE-312", "CWE-200"],
+                            tags=["s3", "cloud-storage", "exposure", "aws", "data-leak", "replay-proof"],
+                            confidence="high",
+                            status="confirmed",
+                        )
+                        self._add_finding(finding)
                 except Exception:
                     continue
-            return checked
+        return checked
 
     async def _check_cloud_metadata(self, url: str) -> None:
         """Check if cloud metadata endpoints are accessible from the application."""

@@ -947,6 +947,10 @@ class Orchestrator:
             # Parse URL
             from urllib.parse import urlparse
 
+            wildcard_scope = raw.startswith("*.")
+            if wildcard_scope:
+                raw = raw[2:]
+
             if raw.startswith(("http://", "https://")):
                 parsed = urlparse(raw)
                 host = parsed.hostname or raw
@@ -975,7 +979,8 @@ class Orchestrator:
                 port=port,
                 protocol=protocol,
                 url=url,
-                scope_tags=["initial"],
+                scope_tags=["initial"] + (["wildcard_scope"] if wildcard_scope else []),
+                metadata={"wildcard_scope": wildcard_scope} if wildcard_scope else {},
             )
             targets.append(target)
             logger.debug("Parsed target: {host}:{port} ({proto})", host=host, port=port, proto=protocol)
@@ -1004,17 +1009,12 @@ class Orchestrator:
                 ipaddress.ip_address(target.host)
                 ips.append(target.host)
             except ValueError:
-                # It's a domain — extract the base domain for wildcard scope
-                parts = target.host.split(".")
-                if len(parts) >= 2:
-                    # Use *.domain.tld pattern
-                    base = ".".join(parts[-2:])
-                    pattern = f"*.{base}"
-                    if pattern not in domains:
-                        domains.append(pattern)
-                else:
-                    if target.host not in domains:
-                        domains.append(target.host)
+                host = target.host.lower().rstrip(".")
+                pattern = f"*.{host[2:]}" if host.startswith("*.") else host
+                if target.metadata.get("wildcard_scope") and not pattern.startswith("*."):
+                    pattern = f"*.{pattern}"
+                if pattern not in domains:
+                    domains.append(pattern)
 
         return ScopeConfig(
             authorized_domains=domains,

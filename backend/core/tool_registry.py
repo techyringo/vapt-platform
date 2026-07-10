@@ -872,7 +872,20 @@ def get_tool_capability(tool_name: str) -> ToolCapability | None:
 
 
 def all_tool_capabilities() -> dict[str, dict[str, Any]]:
-    return {name: cap.to_dict() for name, cap in TOOL_CAPABILITIES.items()}
+    return {name: public_tool_capability(cap) for name, cap in TOOL_CAPABILITIES.items()}
+
+
+def public_tool_capability(capability: ToolCapability) -> dict[str, Any]:
+    """Return capability metadata safe for product/API display.
+
+    Exact environment variable names are internal deployment details. Expose
+    only whether credentials are required and how many, not their names.
+    """
+    data = capability.to_dict()
+    required = data.pop("requires_api_keys", []) or []
+    data["requires_credentials"] = bool(required)
+    data["required_credentials_count"] = len(required)
+    return data
 
 
 def select_tools(

@@ -90,13 +90,14 @@ export interface APIKeyStatus {
   groups: Record<string, Array<{
     name: string;
     configured: boolean;
-    storage: string;
   }>>;
   summary: Record<string, {
     configured: number;
     total: number;
   }>;
   secrets_returned: boolean;
+  credential_names_returned?: boolean;
+  storage_location_returned?: boolean;
 }
 
 export interface RuntimeLogFile {
@@ -202,4 +203,62 @@ export interface ScanCoverage {
     blind_spots: number;
   };
   checks: CoverageCheck[];
+}
+
+export interface LLMFallbackProvider {
+  provider: string;
+  model: string;
+  base_url: string;
+  api_key?: string;        // write-only (never returned)
+  api_key_env?: string;
+  verify_ssl?: boolean;
+  has_api_key?: boolean;   // read-only
+}
+
+export interface LLMConfig {
+  provider: string;
+  model: string;
+  base_url: string;
+  verify_ssl: boolean;
+  api_key_env: string;
+  has_api_key: boolean;
+  analysis_model: string;
+  report_model: string;
+  temperature: number;
+  max_tokens: number;
+  fallback_providers: LLMFallbackProvider[];
+  enabled: boolean | null;
+  allow_fallbacks: boolean | null;
+}
+
+export interface LLMConfigInput {
+  provider: string;
+  model: string;
+  base_url: string;
+  verify_ssl: boolean;
+  api_key: string;
+  api_key_env: string;
+  analysis_model: string;
+  report_model: string;
+  temperature: number;
+  max_tokens: number;
+  fallback_providers: LLMFallbackProvider[];
+  enabled: boolean;
+  allow_fallbacks: boolean;
+}
+
+export interface LLMTestInput {
+  provider: string;
+  model: string;
+  base_url: string;
+  verify_ssl: boolean;
+  api_key: string;
+  api_key_env: string;
+}
+
+export interface LLMProbe {
+  reachable: boolean;
+  models: string[];
+  selected_model_present: boolean | null;
+  error: string;
 }

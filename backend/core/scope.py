@@ -114,7 +114,8 @@ class ScopeManager:
 
         normalised_host = self._normalize_domain(hostname)
 
-        # Check domain-level authorisation
+        # Check domain-level authorisation. Exact domains are exact-only;
+        # wildcard expansion must be explicit (for example: *.example.com).
         domain_ok = (
             self._matches_authorised_domain(normalised_host)
             or self._matches_discovered_domain(normalised_host)
@@ -202,8 +203,10 @@ class ScopeManager:
     def add_discovered_asset(self, domain: str) -> None:
         """Dynamically add a discovered subdomain to the authorised scope.
 
-        Assets are only added if their parent domain is already covered
-        by an authorised domain pattern (including wildcards).
+        Assets are only added if they are directly authorised. This keeps
+        passive discovery separate from active testing: an engagement for
+        ``example.com`` can report ``app.example.com`` as discovered inventory,
+        but only ``*.example.com`` authorises active testing of subdomains.
 
         Args:
             domain: The subdomain or domain to add.
@@ -213,7 +216,7 @@ class ScopeManager:
         # Verify the discovered domain falls under an authorised pattern
         parent_match = False
         for authorised in self._authorised_domains_normalised:
-            if self._domain_matches_pattern(normalised, authorised):
+            if self._domain_matches_authorised_pattern(normalised, authorised):
                 parent_match = True
                 break
 
@@ -335,11 +338,11 @@ class ScopeManager:
     # ── Domain Matching ────────────────────────────────────────────
 
     def _domain_matches_pattern(self, domain: str, pattern: str) -> bool:
-        """Check whether *domain* matches a scope *pattern*.
+        """Check whether *domain* is covered by *pattern* for discovery.
 
-        Supports wildcard patterns like ``*.example.com`` which match
-        any direct subdomain (e.g. ``www.example.com``) as well as
-        deeper subdomains (e.g. ``api.staging.example.com``).
+        This broad matcher is intentionally used for passive discovery and
+        out-of-scope exclusions. Active authorisation uses
+        ``_domain_matches_authorised_pattern`` below.
 
         Args:
             domain:  Normalised domain to test (lowercase, no trailing dot).
@@ -355,15 +358,8 @@ class ScopeManager:
         if domain == pattern:
             return True
 
-        # Wildcard match: *.example.com matches sub.example.com AND a.b.example.com
         if pattern.startswith("*."):
-            base = pattern[2:]  # Remove "*."
-            # domain must end with .base or equal base
-            if domain == base:
-                return True
-            if domain.endswith(f".{base}"):
-                return True
-            return False
+            return self._domain_matches_authorised_pattern(domain, pattern)
 
         # Non-wildcard: domain must equal pattern or be a subdomain of it
         # e.g., pattern=example.com matches sub.example.com
@@ -372,6 +368,21 @@ class ScopeManager:
         if domain.endswith(f".{pattern}"):
             return True
 
+        return False
+
+    def _domain_matches_authorised_pattern(self, domain: str, pattern: str) -> bool:
+        """Check active testing authorisation for a domain pattern.
+
+        ``example.com`` authorises only ``example.com``.
+        ``*.example.com`` authorises ``example.com`` and its subdomains.
+        """
+        if not pattern:
+            return False
+        if domain == pattern:
+            return True
+        if pattern.startswith("*."):
+            base = pattern[2:]
+            return domain == base or domain.endswith(f".{base}")
         return False
 
     def _normalize_domain(self, domain: str) -> str:
@@ -400,9 +411,24 @@ class ScopeManager:
             ``True`` if the host matches any authorised domain pattern.
         """
         for pattern in self._authorised_domains_normalised:
-            if self._domain_matches_pattern(normalised_host, pattern):
+            if self._domain_matches_authorised_pattern(normalised_host, pattern):
                 return True
         return False
+
+    def is_discoverable_host(self, host: str) -> bool:
+        """Return whether a host may be passively reported as related scope.
+
+        Passive recon is allowed to keep discovered child hosts under an
+        authorised domain for reporting, while active probing still requires
+        ``is_in_scope`` to pass.
+        """
+        normalised = self._normalize_domain(str(host or ""))
+        if not normalised or self._is_out_of_scope(normalised, "/"):
+            return False
+        return any(
+            self._domain_matches_pattern(normalised, pattern)
+            for pattern in self._authorised_domains_normalised
+        )
 
     def _matches_discovered_domain(self, normalised_host: str) -> bool:
         """Check if a normalised hostname matches any dynamically discovered domain.

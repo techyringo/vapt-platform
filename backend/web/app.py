@@ -36,6 +36,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 from datetime import datetime
+from urllib.parse import urlparse, urlunparse
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
@@ -93,6 +94,38 @@ class RecoveryRequest(BaseModel):
     clear_queue: bool = False
 
 
+class LLMConfigRequest(BaseModel):
+    """Frontend-driven LLM configuration (runtime, no code/config edit needed).
+
+    ``api_key`` is stored locally (single-tenant) so cloud / Basic-Auth
+    endpoints can be configured from the UI. Pass an empty string to preserve
+    the previously stored key (so the UI never round-trips the secret).
+    """
+    provider: str
+    model: str
+    base_url: str = ""
+    verify_ssl: bool = True
+    api_key: str = ""
+    api_key_env: str = ""
+    analysis_model: str = ""
+    report_model: str = ""
+    temperature: float = 0.3
+    max_tokens: int = 4096
+    fallback_providers: list[dict[str, Any]] = []
+    enabled: bool = True
+    allow_fallbacks: bool = True
+
+
+class LLMTestRequest(BaseModel):
+    """Probe a candidate LLM endpoint without persisting it."""
+    provider: str
+    model: str = ""
+    base_url: str = ""
+    verify_ssl: bool = True
+    api_key: str = ""
+    api_key_env: str = ""
+
+
 API_KEY_GROUPS: dict[str, list[str]] = {
     "llm": [
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
@@ -112,11 +145,10 @@ def api_key_status_payload() -> dict[str, Any]:
     for group, keys in API_KEY_GROUPS.items():
         groups[group] = [
             {
-                "name": key,
+                "name": f"{group.upper()} credential {index}",
                 "configured": env_configured(key),
-                "storage": ".env / docker compose environment",
             }
-            for key in keys
+            for index, key in enumerate(keys, start=1)
         ]
     return {
         "groups": groups,
@@ -128,6 +160,8 @@ def api_key_status_payload() -> dict[str, Any]:
             for group, items in groups.items()
         },
         "secrets_returned": False,
+        "credential_names_returned": False,
+        "storage_location_returned": False,
     }
 
 
@@ -200,7 +234,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         CORSMiddleware,
         allow_origins=cors_origins,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
         allow_headers=["Content-Type", "X-API-Key", "Authorization"],
     )
 
@@ -258,16 +292,30 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     async def llm_status_payload(probe: bool = True) -> dict[str, Any]:
         """Return redacted LLM readiness and lightweight connectivity status."""
         cfg = get_config(app)
-        enabled = os.environ.get("VAPT_LLM_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        try:
+            from core.runtime_config import apply_runtime_llm_overlay
+            apply_runtime_llm_overlay(cfg)
+        except Exception:
+            pass
+        enabled = (
+            bool(cfg.llm.enabled)
+            if cfg.llm.enabled is not None
+            else os.environ.get("VAPT_LLM_ENABLED", "").strip().lower() in {"1", "true", "yes", "on"}
+        )
         provider = cfg.llm.provider
         model = cfg.llm.model
         base_url = (cfg.llm.base_url or "").rstrip("/")
+        allow_fallbacks = (
+            bool(cfg.llm.allow_fallbacks)
+            if cfg.llm.allow_fallbacks is not None
+            else os.environ.get("VAPT_LLM_ALLOW_FALLBACKS", "").strip().lower() in {"1", "true", "yes", "on"}
+        )
         status: dict[str, Any] = {
             "enabled": enabled,
             "provider": provider,
             "model": model,
             "base_url": base_url,
-            "allow_fallbacks": os.environ.get("VAPT_LLM_ALLOW_FALLBACKS", "").strip().lower() in {"1", "true", "yes", "on"},
+            "allow_fallbacks": allow_fallbacks,
             "available_providers": [],
             "reachable": False,
             "models": [],
@@ -393,6 +441,234 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     async def llm_status():
         """Return LLM provider/model readiness without exposing secrets."""
         return await llm_status_payload(probe=True)
+
+    # ─── Runtime LLM Configuration (frontend-configurable, no hardcoded model) ──
+
+    def _public_llm_config(cfg) -> dict[str, Any]:
+        """Return the effective LLM config with secrets redacted (has_api_key bool)."""
+        llm = cfg.llm
+        return {
+            "provider": llm.provider,
+            "model": llm.model,
+            "base_url": llm.base_url or "",
+            "verify_ssl": getattr(llm, "verify_ssl", True),
+            "api_key_env": llm.api_key_env or "",
+            "has_api_key": bool(getattr(llm, "api_key", "") or os.environ.get(llm.api_key_env, "")),
+            "analysis_model": llm.analysis_model or llm.model,
+            "report_model": llm.report_model or llm.model,
+            "temperature": llm.temperature,
+            "max_tokens": llm.max_tokens,
+            "fallback_providers": [
+                {
+                    "provider": p.get("provider", ""),
+                    "model": p.get("model", ""),
+                    "base_url": p.get("base_url", ""),
+                    "api_key_env": p.get("api_key_env", ""),
+                    "verify_ssl": p.get("verify_ssl", True),
+                    "has_api_key": bool(p.get("api_key", "") or os.environ.get(p.get("api_key_env", ""), "")),
+                }
+                for p in (llm.fallback_providers or [])
+            ],
+            "enabled": getattr(llm, "enabled", None),
+            "allow_fallbacks": getattr(llm, "allow_fallbacks", None),
+        }
+
+    def _model_present(model: str, models: list[str]):
+        """Tag-tolerant membership: ``llama3.2`` matches ``llama3.2:latest`` (Ollama default tag)."""
+        if not model or not models:
+            return None
+        return any(model == m or m.startswith(model + ":") or model.startswith(m + ":") for m in models)
+
+    def _strip_endpoint_path(base_url: str, suffixes: tuple[str, ...]) -> str:
+        raw = (base_url or "").rstrip("/")
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        path = parsed.path.rstrip("/")
+        for suffix in suffixes:
+            suffix = suffix.rstrip("/")
+            if path == suffix or path.endswith(suffix):
+                new_path = path[: -len(suffix)].rstrip("/")
+                return urlunparse(parsed._replace(path=new_path, params="", query="", fragment="")).rstrip("/")
+        return raw
+
+    def _normalise_llm_endpoint(provider: str, base_url: str) -> tuple[str, str]:
+        provider = (provider or "").lower().strip()
+        base_url = (base_url or "").strip().rstrip("/")
+        parsed_path = urlparse(base_url).path.rstrip("/")
+
+        if provider == "ollama" and parsed_path.endswith("/chat"):
+            provider = "http_basic_chat"
+        if provider == "openai_compat":
+            base_url = _strip_endpoint_path(base_url, ("/v1/chat/completions", "/v1/completions", "/v1/models", "/v1"))
+        elif provider == "ollama":
+            base_url = _strip_endpoint_path(base_url, ("/api/generate", "/api/chat", "/api/tags"))
+        elif provider == "http_basic_chat":
+            base_url = _strip_endpoint_path(base_url, ("/chat", "/models"))
+        return provider, base_url
+
+    async def _probe_llm(provider: str, model: str, base_url: str, api_key: str,
+                         api_key_env: str = "", verify_ssl: bool = True) -> dict[str, Any]:
+        """Probe a candidate LLM endpoint: reachable + available models.
+
+        Covers ollama (/api/tags), http_basic_chat (Basic-auth <models_path>),
+        and the OpenAI-compatible family (/v1/models).
+        """
+        provider, base_url = _normalise_llm_endpoint(provider, base_url)
+        out: dict[str, Any] = {"reachable": False, "models": [], "selected_model_present": None, "error": ""}
+        try:
+            import httpx
+            if provider == "ollama":
+                url = base_url or "http://localhost:11434"
+                async with httpx.AsyncClient(timeout=10, verify=verify_ssl) as c:
+                    r = await c.get(f"{url}/api/tags")
+                if r.status_code != 200:
+                    out["error"] = f"HTTP {r.status_code}: {r.text[:200]}"
+                    return out
+                models = [it.get("name") or it.get("model") for it in r.json().get("models", []) if it.get("name") or it.get("model")]
+                out["models"] = models
+                out["reachable"] = True
+                out["selected_model_present"] = _model_present(model, models)
+            elif provider == "http_basic_chat":
+                if not base_url:
+                    out["error"] = "base_url required"
+                    return out
+                auth = api_key or os.environ.get(api_key_env, "")
+                if not auth or ":" not in auth:
+                    out["error"] = f"{api_key_env or 'api_key'} must be set as 'username:password'"
+                    return out
+                u, p = auth.split(":", 1)
+                async with httpx.AsyncClient(timeout=10, verify=verify_ssl) as c:
+                    r = await c.get(f"{base_url}/models", auth=(u, p))
+                if r.status_code == 200:
+                    try:
+                        models = [m.get("name") or m.get("model") for m in r.json().get("models", []) if isinstance(m, dict)]
+                    except Exception:
+                        models = []
+                    out["models"] = models
+                    out["reachable"] = True
+                    out["selected_model_present"] = _model_present(model, models)
+                else:
+                    out["error"] = f"HTTP {r.status_code}: {r.text[:200]}"
+            else:
+                defaults = {"openai": "https://api.openai.com", "groq": "https://api.groq.com/openai", "together": "https://api.together.xyz"}
+                url = base_url or defaults.get(provider, "")
+                if not url:
+                    out["error"] = "base_url required"
+                    return out
+                headers = {"Content-Type": "application/json"}
+                key = api_key or os.environ.get(api_key_env, "")
+                if key:
+                    headers["Authorization"] = f"Bearer {key}"
+                async with httpx.AsyncClient(timeout=10, verify=verify_ssl) as c:
+                    r = await c.get(f"{url}/v1/models", headers=headers)
+                if r.status_code == 200:
+                    models = [d.get("id") for d in r.json().get("data", []) if d.get("id")]
+                    out["models"] = models
+                    out["reachable"] = True
+                    out["selected_model_present"] = (model in models) if model else None
+                elif r.status_code in (401, 403):
+                    out["reachable"] = True
+                    out["error"] = f"Auth failed (HTTP {r.status_code}) — endpoint reachable, key invalid"
+                else:
+                    out["error"] = f"HTTP {r.status_code}: {r.text[:200]}"
+        except Exception as e:
+            out["error"] = f"{type(e).__name__}: {e!r}"
+        return out
+
+    @app.get("/api/config/llm")
+    async def get_llm_config_endpoint():
+        """Return the effective (runtime-overlaid) LLM config, secrets redacted."""
+        cfg = get_config(app)
+        try:
+            from core.runtime_config import apply_runtime_llm_overlay
+            apply_runtime_llm_overlay(cfg)
+        except Exception:
+            pass
+        return {"llm": _public_llm_config(cfg)}
+
+    @app.put("/api/config/llm")
+    async def put_llm_config_endpoint(req: LLMConfigRequest):
+        """Persist frontend LLM settings and probe the endpoint.
+
+        Empty ``api_key`` preserves the previously stored key. Invalidates the
+        cached AppConfig so the next read (and every new LLMClient) picks up the
+        new settings without a restart.
+        """
+        from core.runtime_config import get_runtime_llm, save_runtime_llm
+        existing = get_runtime_llm() or {}
+        primary_provider, primary_base_url = _normalise_llm_endpoint(req.provider, req.base_url)
+        api_key = req.api_key if req.api_key else existing.get("api_key", "")
+        # Preserve per-fallback secrets: a blank api_key means "keep stored"
+        # (matched by provider+model+base_url), so re-saving the chain from the
+        # UI never wipes a previously stored Basic-Auth / cloud key.
+        existing_fb: dict[tuple, dict] = {}
+        for f in (existing.get("fallback_providers") or []):
+            if isinstance(f, dict):
+                existing_fb[(f.get("provider"), f.get("model"), f.get("base_url"))] = f
+                norm_provider, norm_base_url = _normalise_llm_endpoint(f.get("provider", ""), f.get("base_url", ""))
+                existing_fb[(norm_provider, f.get("model"), norm_base_url)] = f
+        merged_fb = []
+        for f in req.fallback_providers:
+            f = dict(f) if isinstance(f, dict) else {}
+            f_provider, f_base_url = _normalise_llm_endpoint(f.get("provider", ""), f.get("base_url", ""))
+            f["provider"] = f_provider
+            f["base_url"] = f_base_url
+            if not f.get("api_key"):
+                prev = existing_fb.get((f.get("provider"), f.get("model"), f.get("base_url")))
+                if prev and prev.get("api_key"):
+                    f["api_key"] = prev["api_key"]
+            merged_fb.append(f)
+        llm = {
+            "provider": primary_provider,
+            "model": req.model,
+            "base_url": primary_base_url,
+            "verify_ssl": req.verify_ssl,
+            "api_key_env": req.api_key_env,
+            "api_key": api_key,
+            "analysis_model": req.analysis_model or req.model,
+            "report_model": req.report_model or req.model,
+            "temperature": req.temperature,
+            "max_tokens": req.max_tokens,
+            "fallback_providers": merged_fb,
+            "enabled": req.enabled,
+            "allow_fallbacks": req.allow_fallbacks,
+        }
+        save_runtime_llm(llm)
+        app.state._config = None  # invalidate cache → get_config re-applies overlay
+        cfg = get_config(app)
+        try:
+            from core.runtime_config import apply_runtime_llm_overlay
+            apply_runtime_llm_overlay(cfg)
+        except Exception:
+            pass
+        probe = await _probe_llm(primary_provider, req.model, primary_base_url, api_key, req.api_key_env, req.verify_ssl)
+        return {"llm": _public_llm_config(cfg), "probe": probe}
+
+    @app.post("/api/config/llm/test")
+    async def test_llm_config_endpoint(req: LLMTestRequest):
+        """Probe a candidate LLM endpoint WITHOUT persisting (Test Connection)."""
+        from core.runtime_config import get_runtime_llm
+        rt = get_runtime_llm() or {}
+        provider, base_url = _normalise_llm_endpoint(req.provider, req.base_url)
+        api_key = req.api_key
+        if not api_key:
+            # Reuse the stored secret for the matching endpoint — primary first,
+            # then fallbacks — so a Test with a blank key probes the saved creds.
+            rt_provider, rt_base_url = _normalise_llm_endpoint(rt.get("provider", ""), rt.get("base_url", ""))
+            if rt_provider == provider and rt_base_url == base_url:
+                api_key = rt.get("api_key", "")
+            else:
+                for f in (rt.get("fallback_providers") or []):
+                    if not isinstance(f, dict):
+                        continue
+                    f_provider, f_base_url = _normalise_llm_endpoint(f.get("provider", ""), f.get("base_url", ""))
+                    if f_provider == provider and f_base_url == base_url:
+                        api_key = f.get("api_key", "")
+                        break
+        api_key_env = req.api_key_env or (rt.get("api_key_env", "") if rt else "")
+        probe = await _probe_llm(provider, req.model, base_url, api_key, api_key_env, req.verify_ssl)
+        return {"probe": probe}
 
     def wordlist_status_payload() -> dict[str, Any]:
         """Return local wordlist readiness for audit/debug visibility."""
@@ -531,7 +807,10 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 "docker_image_present": image_present,
                 "will_use": will_use,
                 "availability": availability,
-                "missing_api_keys": missing_keys,
+                "requires_credentials": bool(required_keys),
+                "required_credentials_count": len(required_keys),
+                "missing_credentials": bool(missing_keys),
+                "missing_credentials_count": len(missing_keys),
                 "display_name": capability.display_name if capability else tool_name,
                 "phases": capability.phases if capability else [],
                 "categories": capability.categories if capability else [],
@@ -755,7 +1034,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     @app.post("/api/tools/select")
     async def select_tools_for_context(request: ToolSelectionRequest):
         """Return target-aware tool choices for a phase/category/technology."""
-        from core.tool_registry import select_tools
+        from core.tool_registry import public_tool_capability, select_tools
 
         status_payload = await tools_status()
         selected = select_tools(
@@ -770,7 +1049,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "request": request.model_dump(),
             "tools": [
                 {
-                    **capability.to_dict(),
+                    **public_tool_capability(capability),
                     "status": tools.get(capability.name, {}),
                 }
                 for capability in selected
@@ -1072,7 +1351,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 availability = tool_status.get(tool.get("name"), {})
                 tool["availability"] = availability.get("availability", "unknown")
                 tool["will_use"] = availability.get("will_use", "unknown")
-                tool["missing_api_keys"] = availability.get("missing_api_keys", [])
+                tool["requires_credentials"] = availability.get("requires_credentials", False)
+                tool["missing_credentials"] = availability.get("missing_credentials", False)
+                tool["missing_credentials_count"] = availability.get("missing_credentials_count", 0)
         return plan
 
     @app.get("/api/scans/{scan_id}/agents")

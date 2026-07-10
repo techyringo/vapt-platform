@@ -12,9 +12,10 @@ import asyncio
 import json
 import tempfile
 import os
+import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 
 from loguru import logger
 
@@ -111,6 +112,7 @@ class VulnScannerAgent(BaseAgent):
 
         if self.config.tools.get("nikto", AppConfig().get_tool_config("nikto")).enabled:
             nikto_findings = await self._run_nikto(web_roots[:5])
+            nikto_findings = await self._validate_nikto_findings(nikto_findings)
             self._augment_cms_detection_from_nikto(nikto_findings, technologies)
 
         cms_findings = await self._run_cms_scanners(web_roots, technologies)
@@ -606,6 +608,145 @@ class VulnScannerAgent(BaseAgent):
                 )
         return all_findings
 
+    async def _validate_nikto_findings(self, nikto_findings: list[dict]) -> list[dict]:
+        """Replay and filter Nikto findings before they become report items.
+
+        Nikto is useful as a discovery tool, but many lines are "potentially
+        interesting" hints rather than vulnerabilities. For exposed file claims
+        such as `/ai.pem`, require live HTTP proof and classify the actual
+        content. Non-reproducible hints are kept in tool artifacts only.
+        """
+        if not nikto_findings:
+            return []
+
+        import httpx as httpx_client
+
+        validated: list[dict] = []
+        async with httpx_client.AsyncClient(
+            verify=False,
+            timeout=10,
+            follow_redirects=False,
+            headers={"User-Agent": "Mozilla/5.0"},
+        ) as client:
+            for item in nikto_findings:
+                finding_text = str(item.get("finding") or "")
+                lower = finding_text.lower()
+                if self._nikto_requires_replay(lower):
+                    proof = await self._replay_nikto_path(client, item)
+                    if not proof:
+                        logger.info(
+                            "[VULN_SCAN] Dropping weak Nikto hint without replay proof: {finding}",
+                            finding=finding_text[:140],
+                        )
+                        continue
+                    item.update(proof)
+                validated.append(item)
+        return validated
+
+    @staticmethod
+    def _nikto_requires_replay(finding_lower: str) -> bool:
+        return any(token in finding_lower for token in (
+            "potentially interesting",
+            "backup",
+            "cert file",
+            "certificate",
+            "private key",
+            ".pem",
+            ".key",
+            ".bak",
+            ".old",
+            ".zip",
+            ".tar",
+            ".sql",
+            ".env",
+            "config file",
+        ))
+
+    async def _replay_nikto_path(self, client: Any, item: dict) -> dict[str, Any] | None:
+        raw = str(item.get("finding") or item.get("raw") or "")
+        target_url = str(item.get("target_url") or "")
+        if not target_url:
+            return None
+        match = re.search(r"(?P<path>/[^\s:]+)", raw)
+        if not match:
+            return None
+        path = match.group("path")
+        url = urljoin(target_url.rstrip("/") + "/", path.lstrip("/"))
+        if not self.is_in_scope(url):
+            return None
+        try:
+            response = await client.get(url)
+        except Exception as exc:
+            logger.debug("[VULN_SCAN] Nikto replay failed for {url}: {err}", url=url, err=exc)
+            return None
+        if response.status_code not in {200, 206}:
+            return None
+
+        body = response.text[:80_000]
+        body_lower = body.lower()
+        content_type = response.headers.get("content-type", "")
+        content_length = len(response.content or b"")
+        if content_length < 16:
+            return None
+
+        is_private_key = any(marker in body for marker in (
+            "-----BEGIN PRIVATE KEY-----",
+            "-----BEGIN RSA PRIVATE KEY-----",
+            "-----BEGIN EC PRIVATE KEY-----",
+            "-----BEGIN OPENSSH PRIVATE KEY-----",
+        ))
+        is_certificate = "-----BEGIN CERTIFICATE-----" in body
+        looks_secret = any(marker in body_lower for marker in (
+            "aws_access_key_id",
+            "aws_secret_access_key",
+            "password=",
+            "secret_key",
+            "api_key",
+            "database_url",
+            "db_password",
+        ))
+        generic_html = "text/html" in content_type.lower() and not (is_private_key or is_certificate or looks_secret)
+        if generic_html and path.lower().endswith((".pem", ".key", ".env", ".sql", ".bak", ".old")):
+            return None
+
+        if is_private_key:
+            severity = "critical"
+            confidence = "high"
+            finding_type = "exposed private key"
+            remediation = "Remove the private key from the web root immediately, rotate the key/certificate, and review access logs for retrieval."
+        elif looks_secret:
+            severity = "high"
+            confidence = "high"
+            finding_type = "exposed secret/config content"
+            remediation = "Remove the exposed file from the web root, rotate affected secrets, and restrict access to deployment artifacts."
+        elif is_certificate:
+            severity = "informational"
+            confidence = "medium"
+            finding_type = "public certificate file"
+            remediation = "Move certificate artifacts out of the web root unless they are intentionally public. Confirm no private key is exposed."
+        else:
+            severity = "low"
+            confidence = "medium"
+            finding_type = "retrievable backup/config-like file"
+            remediation = "Verify whether this file is intended to be public. Remove backup/config artifacts from the web root and block direct access."
+
+        safe_sample = body[:600].replace("\x00", "\\0")
+        return {
+            "validated_url": url,
+            "http_status": response.status_code,
+            "content_type": content_type,
+            "content_length": content_length,
+            "finding_type": finding_type,
+            "severity": severity,
+            "confidence": confidence,
+            "remediation": remediation,
+            "request_proof": f"GET {url}",
+            "response_proof": (
+                f"HTTP {response.status_code}; content-type={content_type or 'unknown'}; "
+                f"bytes={content_length}; sample={safe_sample}"
+            ),
+        }
+
     async def _run_cms_scanners(self, targets: list[str], technologies: dict[str, list[str]]) -> list[dict]:
         """Run CMS-specific vulnerability scanners based on detected technology."""
         cms_findings = []
@@ -625,6 +766,15 @@ class VulnScannerAgent(BaseAgent):
 
         wp_hosts = cms_hosts["wordpress"]
         wp_targets = cms_targets["wordpress"]
+        verified_wp_targets: list[str] = []
+        if wp_hosts:
+            verified_wp_targets = await self._verified_wordpress_targets(sorted(wp_targets))
+            skipped = sorted(set(wp_targets) - set(verified_wp_targets))
+            for url in skipped:
+                logger.info(
+                    "[VULN_SCAN] Skipping WordPress-specific scanners on {url}: active probe did not confirm WordPress",
+                    url=url,
+                )
 
         if wp_hosts and self.config.tools.get("wpscan", AppConfig().get_tool_config("wpscan")).enabled:
             from utils.env import first_env_value
@@ -636,13 +786,14 @@ class VulnScannerAgent(BaseAgent):
                     "Get a free token at https://wpscan.com/api"
                 )
 
-            logger.info(
-                "[VULN_SCAN] WordPress detected on {hosts}; starting WPScan on {count} target(s)",
-                hosts=", ".join(sorted(wp_hosts)),
-                count=len(wp_targets),
-            )
+            if verified_wp_targets:
+                logger.info(
+                    "[VULN_SCAN] WordPress detected on {hosts}; starting WPScan on {count} target(s)",
+                    hosts=", ".join(sorted(wp_hosts)),
+                    count=len(verified_wp_targets),
+                )
 
-            for wp_url in sorted(wp_targets):
+            for wp_url in verified_wp_targets:
                 # WPScan treats "all" and "vulnerable-only" choices as mutually
                 # exclusive (for example p cannot be combined with vp). Run a
                 # broad component pass first, then a token-backed vulnerable-only
@@ -675,6 +826,7 @@ class VulnScannerAgent(BaseAgent):
                     self._record_tool_run(result, "cms_scanning")
                     if result.stdout.strip():
                         findings = OutputParser.parse_wpscan(result.stdout)
+                        findings = [item for item in findings if item.get("reportable") is not False]
                         cms_findings.extend(findings)
                         logger.info(
                             "[VULN_SCAN] wpscan on {url} ({flags}): exit={code} findings={c} token={has_token}",
@@ -705,12 +857,71 @@ class VulnScannerAgent(BaseAgent):
         elif wp_hosts:
             logger.warning("[VULN_SCAN] WordPress detected but WPScan is disabled")
 
+        if wp_hosts:
+            cms_targets["wordpress"] = set(verified_wp_targets)
+
         for family, family_targets in cms_targets.items():
             if not family_targets:
                 continue
             cms_findings.extend(await self._run_cms_nuclei(family, sorted(family_targets)))
 
         return cms_findings
+
+    async def _verified_wordpress_targets(self, targets: list[str]) -> list[str]:
+        """Return only targets with active, reproducible WordPress evidence."""
+        verified: list[str] = []
+        for url in targets:
+            if await self._is_wordpress_target(url):
+                verified.append(url)
+        return verified
+
+    async def _is_wordpress_target(self, root_url: str) -> bool:
+        """Actively confirm WordPress before running WPScan.
+
+        Historical URLs and generic scanner text are useful hints, but WPScan is
+        noisy and slow when the site is not WordPress. Require current evidence:
+        WP generator/meta, wp-content/wp-includes markers, wp-json, or login
+        form markers.
+        """
+        if not root_url or not self.is_in_scope(root_url):
+            return False
+        import httpx as httpx_client
+
+        checks = [
+            root_url,
+            urljoin(root_url.rstrip("/") + "/", "wp-json/"),
+            urljoin(root_url.rstrip("/") + "/", "wp-login.php"),
+        ]
+        try:
+            async with httpx_client.AsyncClient(
+                verify=False,
+                timeout=10,
+                follow_redirects=True,
+                headers={"User-Agent": "Mozilla/5.0"},
+            ) as client:
+                for url in checks:
+                    response = await client.get(url)
+                    text = (
+                        response.text[:250_000]
+                        + " "
+                        + " ".join(f"{k}: {v}" for k, v in response.headers.items())
+                    ).lower()
+                    if any(marker in text for marker in (
+                        "content=\"wordpress",
+                        "wp-content/",
+                        "wp-includes/",
+                        "\"wp-json\"",
+                        "/wp-json/",
+                        "wp-submit",
+                    )):
+                        return True
+                    if url.rstrip("/").endswith("wp-json") and response.status_code == 200:
+                        ctype = response.headers.get("content-type", "").lower()
+                        if "json" in ctype and any(marker in text for marker in ("namespaces", "routes", "wp/v2")):
+                            return True
+        except Exception as exc:
+            logger.debug("[VULN_SCAN] WordPress probe failed for {url}: {err}", url=root_url, err=exc)
+        return False
 
     async def _run_tech_specific_nuclei(
         self,
@@ -959,20 +1170,59 @@ class VulnScannerAgent(BaseAgent):
 
     def _convert_nikto_findings(self, nikto_findings: list[dict], target: Target) -> None:
         """Convert nikto results to Finding objects."""
+        severity_map = {
+            "critical": Severity.CRITICAL,
+            "high": Severity.HIGH,
+            "medium": Severity.MEDIUM,
+            "low": Severity.LOW,
+            "informational": Severity.INFORMATIONAL,
+            "info": Severity.INFORMATIONAL,
+        }
         for nk in nikto_findings:
             if nk.get("reportable") is False:
                 continue
+            validated_url = nk.get("validated_url") or ""
+            finding_type = nk.get("finding_type") or "web server issue"
+            if self._nikto_requires_replay(str(nk.get("finding", "")).lower()) and not validated_url:
+                continue
+            severity = severity_map.get(str(nk.get("severity", "medium")).lower(), Severity.MEDIUM)
+            host = target.host
+            if validated_url:
+                parsed = urlparse(validated_url)
+                host = parsed.hostname or host
+            evidence = nk.get("raw", nk.get("finding", ""))
+            if validated_url:
+                evidence = (
+                    f"Nikto reported: {nk.get('finding', '')}\n"
+                    f"Replay confirmed {validated_url} returned HTTP {nk.get('http_status')} "
+                    f"with content-type={nk.get('content_type') or 'unknown'} and "
+                    f"{nk.get('content_length')} bytes."
+                )
             finding = Finding(
-                title=f"Web Server Issue: {nk.get('finding', '')[:80]}",
-                description=f"Nikto detected: {nk.get('finding', '')}",
-                severity=Severity.MEDIUM,
+                title=(
+                    f"Exposed {finding_type}: {validated_url}"
+                    if validated_url else
+                    f"Web Server Issue: {nk.get('finding', '')[:80]}"
+                ),
+                description=(
+                    f"Nikto reported `{nk.get('finding', '')}` and replay validation "
+                    f"confirmed the resource is currently retrievable."
+                    if validated_url else
+                    f"Nikto detected: {nk.get('finding', '')}"
+                ),
+                severity=severity,
                 agent_source=AgentType.VULN_SCANNER,
-                target=target,
-                evidence=nk.get("raw", nk.get("finding", "")),
-                remediation="Review the Nikto finding and apply the recommended fix. "
-                            "Consult the Nikto documentation and relevant CVE databases.",
-                tags=["nikto", "web-server", "misconfiguration"],
-                confidence="medium",
+                target=Target(host=host, url=validated_url or target.url or target.base_url),
+                evidence=evidence,
+                request_proof=nk.get("request_proof") or None,
+                response_proof=nk.get("response_proof") or None,
+                remediation=nk.get("remediation") or (
+                    "Validate the Nikto signal manually and remove unnecessary exposed files or unsafe web-server behavior."
+                ),
+                tags=["nikto", "web-server", "scanner-evidence"] + (["replay-validated"] if validated_url else ["needs-validation"]),
+                confidence=str(nk.get("confidence") or ("high" if validated_url else "medium")),
+                status="confirmed" if validated_url else "suspected",
+                raw_tool_output=json.dumps(nk, default=str),
             )
             self._add_finding(finding)
 

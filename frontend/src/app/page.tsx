@@ -4,27 +4,30 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type React from 'react';
 import {
   Activity,
-  AlertTriangle,
   Bot,
   Boxes,
   Bug,
   CheckCircle2,
   ChevronRight,
   CircleStop,
+  Command,
   Download,
   FileText,
   Gauge,
   Info,
   LayoutDashboard,
-  Lock,
+  Moon,
   Play,
+  Sun,
   RefreshCw,
   Server,
+  Settings,
   Shield,
   ShieldAlert,
   ShieldCheck,
   Target,
   Trash2,
+  WifiOff,
   Wrench,
   XCircle,
 } from 'lucide-react';
@@ -32,7 +35,7 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentStatus, APIKeyStatus, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentStatus, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -42,7 +45,9 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { MobileTabBar } from '@/components/layout/MobileTabBar';
 
 // UI primitives
-import { EmptyState } from '@/components/ui/EmptyState';
+import { CommandPalette, type CommandAction } from '@/components/ui/CommandPalette';
+import { StateView } from '@/components/ui/StateView';
+import { useTheme } from '@/context/ThemeContext';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ReportModal } from '@/components/ui/ReportModal';
 import { ToastContainer } from '@/components/ui/Toast';
@@ -53,9 +58,10 @@ import { SeverityDonut, SEV_HEX } from '@/components/features/SeverityDonut';
 import { FindingCard, SEV_BADGE_CLASS } from '@/components/features/FindingCard';
 import { AgentCard } from '@/components/features/AgentCard';
 import { LiveFeed, type LogMessage } from '@/components/features/LiveFeed';
+import { LLMConfigPanel } from '@/components/features/LLMConfigPanel';
 
 /* ─── Types ─────────────────────────────────────────────── */
-type Tab = 'dashboard' | 'findings' | 'agents' | 'tools';
+type Tab = 'dashboard' | 'findings' | 'agents' | 'tools' | 'config';
 type SeverityFilter = SeverityKey | 'all';
 const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
 
@@ -83,12 +89,6 @@ const PHASE_ORDER = [
 ] as const;
 
 const ACTIVE_SCAN_STATES = new Set(['running', 'starting', 'pending', 'queued']);
-
-const API_KEY_GROUPS = [
-  { label: 'LLM',   keys: ['OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GEMINI_API_KEY', 'GROQ_API_KEY', 'TOGETHER_API_KEY'] },
-  { label: 'Intel', keys: ['NVD_API_KEY', 'SHODAN_API_KEY', 'CENSYS_API_ID', 'CENSYS_API_SECRET', 'SECURITYTRAILS_API_KEY'] },
-  { label: 'CMS',   keys: ['WPSCAN_API_TOKEN'] },
-] as const;
 
 const SEV_DOT_COLOR: Record<string, string> = {
   critical: '#f43f5e', high: '#f97316', medium: '#eab308', low: '#22c55e', informational: '#06b6d4',
@@ -198,7 +198,6 @@ export default function Dashboard() {
   const [nvdStats,       setNvdStats]       = useState<NVDStats | null>(null);
   const [toolsStatus,    setToolsStatus]    = useState<Record<string, any>>({});
   const [dockerInfo,     setDockerInfo]     = useState<any>(null);
-  const [apiKeyStatus,   setApiKeyStatus]   = useState<APIKeyStatus | null>(null);
   const [runtimeLogs,    setRuntimeLogs]    = useState<RuntimeLogFile[]>([]);
   const [apiHealthy,     setApiHealthy]     = useState<boolean | null>(null);
 
@@ -214,8 +213,13 @@ export default function Dashboard() {
   const [refreshing,        setRefreshing]        = useState(false);
   const [starting,          setStarting]          = useState(false);
 
+  /* Command palette */
+  const [cmdkOpen, setCmdkOpen] = useState(false);
+  const { toggleTheme } = useTheme();
+
   /* Launch form */
   const [targetInput, setTargetInput] = useState('');
+  const [outOfScopeInput, setOutOfScopeInput] = useState('');
   const [scanMode,    setScanMode]    = useState('va_only');
   const [scanName,    setScanName]    = useState('');
 
@@ -356,12 +360,11 @@ export default function Dashboard() {
 
   /* ─── Data loading ─── */
   const refreshAll = useCallback(async () => {
-    const [scanList, modeList, health, tools, keys, logs] = await Promise.allSettled([
+    const [scanList, modeList, health, tools, logs] = await Promise.allSettled([
       api.listScans(),
       api.getModes(),
       api.getHealth(),
       api.getToolsStatus() as Promise<any>,
-      api.getAPIKeysStatus(),
       api.listLogs(),
     ]);
     if (scanList.status === 'fulfilled') {
@@ -384,9 +387,7 @@ export default function Dashboard() {
     if (tools.status === 'fulfilled') {
       setToolsStatus(tools.value.tools || {});
       setDockerInfo(tools.value.docker || null);
-      if (tools.value.api_keys) setApiKeyStatus(tools.value.api_keys);
     }
-    if (keys.status === 'fulfilled') setApiKeyStatus(keys.value);
     if (logs.status === 'fulfilled') setRuntimeLogs(logs.value.files || []);
   }, []);
 
@@ -474,15 +475,22 @@ export default function Dashboard() {
   /* ─── Actions ─── */
   const startScan = async () => {
     const targets = targetInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
+    const outOfScope = outOfScopeInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
     if (!targets.length) return;
     setStarting(true);
     try {
-      const result = await api.startScan(targets, scanMode, scanName || `Scan ${new Date().toLocaleDateString()}`);
+      const result = await api.startScan(
+        targets,
+        scanMode,
+        scanName || `Scan ${new Date().toLocaleDateString()}`,
+        outOfScope.length ? { out_of_scope: outOfScope } : undefined,
+      );
       setSelectedScanId(result.scan_id);
       setFindings([]);
       setAgentStatus({});
       setLogMessages([{ msg: `Scan queued for ${targets.join(', ')}`, level: 'success', time: new Date().toLocaleTimeString() }]);
       setTargetInput('');
+      setOutOfScopeInput('');
       setScanName('');
       toast.success('Scan launched', `${targets.join(', ')} is now being assessed`);
       await refreshAll();
@@ -590,18 +598,32 @@ export default function Dashboard() {
     : 0;
   const activeScans   = scans.filter(s => s.status === 'running').length;
   const dockerReady   = Boolean(dockerInfo?.daemon_reachable);
+  const operationalTools = useMemo(() => (
+    Object.fromEntries(
+      Object.entries(toolsStatus).filter(([, tool]: [string, any]) => {
+        const wu = tool.will_use as string;
+        const availability = tool.availability as string || wu;
+        return (
+          wu === 'docker' ||
+          wu === 'local' ||
+          wu === 'internal' ||
+          wu === 'api' ||
+          availability === 'pullable'
+        );
+      }),
+    )
+  ), [toolsStatus]);
   const toolCounts    = useMemo(() => {
-    const vals = Object.values(toolsStatus);
+    const vals = Object.values(operationalTools);
     return {
       docker:   vals.filter((t: any) => t.will_use === 'docker').length,
       local:    vals.filter((t: any) => t.will_use === 'local').length,
       internal: vals.filter((t: any) => t.will_use === 'internal').length,
-      needsKey: vals.filter((t: any) => t.will_use === 'needs_api_key').length,
+      api:      vals.filter((t: any) => t.will_use === 'api').length,
       pullable: vals.filter((t: any) => t.availability === 'pullable').length,
-      missing:  vals.filter((t: any) => t.availability === 'missing' || t.will_use === 'unavailable').length,
       total:    vals.length,
     };
-  }, [toolsStatus]);
+  }, [operationalTools]);
 
   const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
 
@@ -613,8 +635,41 @@ export default function Dashboard() {
   ];
 
   /* ─── Render ────────────────────────────────────────────── */
+  /* Global ⌘K / Ctrl+K to toggle the command palette */
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
+        e.preventDefault();
+        setCmdkOpen(o => !o);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
+
+  const commandActions: CommandAction[] = [
+    { id: 'nav-dashboard', group: 'Navigate', label: 'Dashboard', sub: 'Overview & launch', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview', run: () => setActiveTab('dashboard') },
+    { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
+    { id: 'nav-agents', group: 'Navigate', label: 'Agents', sub: 'Scan agents & tool runs', icon: Bot, hint: ['3'], keywords: 'roster pipeline', run: () => setActiveTab('agents') },
+    { id: 'nav-tools', group: 'Navigate', label: 'Tools', sub: 'Readiness & logs', icon: Wrench, hint: ['4'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
+    {
+      id: 'act-new-scan', group: 'Actions', label: 'New scan', sub: 'Open the launch panel', icon: Play, keywords: 'start run target',
+      run: () => { setActiveTab('dashboard'); if (targetInput.trim()) startScan(); },
+    },
+    { id: 'act-refresh', group: 'Actions', label: 'Refresh data', icon: RefreshCw, hint: ['R'], keywords: 'reload sync', run: () => handleRefresh() },
+    {
+      id: 'act-report', group: 'Actions', label: 'Download report', sub: selectedScan ? undefined : 'Select a scan first', icon: FileText, keywords: 'export pdf html',
+      run: () => { if (selectedScan) setShowReportModal(true); else toast.info('No scan selected', 'Pick a scan to export a report.'); },
+    },
+    { id: 'act-quarantine', group: 'Actions', label: 'Toggle quarantined findings', icon: ShieldAlert, keywords: 'hide show low evidence', run: () => { setActiveTab('findings'); setShowQuarantined(v => !v); } },
+    { id: 'act-theme', group: 'Preferences', label: 'Toggle light / dark theme', icon: Moon, keywords: 'appearance dark light', run: () => toggleTheme() },
+  ];
+
   return (
     <div className="app-shell">
+      {/* Command palette */}
+      <CommandPalette open={cmdkOpen} onClose={() => setCmdkOpen(false)} actions={commandActions} />
+
       {/* Toast notifications */}
       <ToastContainer toasts={toast.toasts} onDismiss={toast.dismiss} />
 
@@ -648,6 +703,7 @@ export default function Dashboard() {
           targetCount={targetCount}
           refreshing={refreshing}
           onRefresh={handleRefresh}
+          onOpenCommand={() => setCmdkOpen(true)}
         />
 
         {/* Mobile tab bar */}
@@ -655,6 +711,23 @@ export default function Dashboard() {
 
         {/* Main content */}
         <main className="content-area">
+
+          {/* Backend-unreachable banner — persistent while offline */}
+          {apiHealthy === false && !loadingInitial && (
+            <div className="offline-banner" role="alert">
+              <WifiOff size={15} aria-hidden="true" style={{ flexShrink: 0 }} />
+              <span>Backend unreachable — showing the last known data. Reconnecting automatically.</span>
+              <button
+                className="btn btn-secondary"
+                onClick={handleRefresh}
+                disabled={refreshing}
+                style={{ marginLeft: 'auto', flexShrink: 0 }}
+              >
+                <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />
+                Retry
+              </button>
+            </div>
+          )}
 
           {/* ── DASHBOARD TAB ─────────────────────────────── */}
           {activeTab === 'dashboard' && (
@@ -728,6 +801,8 @@ export default function Dashboard() {
                   <LaunchPanel
                     targetInput={targetInput}
                     setTargetInput={setTargetInput}
+                    outOfScopeInput={outOfScopeInput}
+                    setOutOfScopeInput={setOutOfScopeInput}
                     scanMode={scanMode}
                     setScanMode={setScanMode}
                     scanName={scanName}
@@ -828,7 +903,7 @@ export default function Dashboard() {
                       {/* Scan list */}
                       <div style={{ maxHeight: 200, overflowY: 'auto', display: 'grid', gap: 6, marginBottom: 14 }}>
                         {scans.length === 0 ? (
-                          <EmptyState icon={Shield} title="No scans yet" body="Launch your first VA scan from the Launch panel." />
+                          <StateView variant="empty" compact icon={Shield} title="No scans yet" body="Launch your first scan from the panel on the left." />
                         ) : (
                           scans.map(scan => (
                             <div
@@ -1001,9 +1076,18 @@ export default function Dashboard() {
                   {Array.from({ length: 5 }).map((_, i) => <SkeletonFindingCard key={i} />)}
                 </div>
               ) : findings.length === 0 ? (
-                <EmptyState icon={ShieldCheck} title="No findings loaded" body="Select a completed scan or wait for a scan in progress to surface issues." />
+                apiHealthy === false ? (
+                  <StateView variant="error" title="Couldn’t load findings" body="The backend is unreachable. Findings will appear once the connection is restored." onRetry={handleRefresh} />
+                ) : (
+                  <StateView variant="empty" icon={ShieldCheck} title="No findings loaded" body="Select a completed scan, or launch one — findings surface here in real time." />
+                )
               ) : filteredFindings.length === 0 ? (
-                <EmptyState icon={Info} title="No matching findings" body={`No findings match the "${severityLabel(severityFilter)}" filter.`} />
+                <StateView
+                  variant="no-results"
+                  title="No matching findings"
+                  body={`Nothing matches the "${severityLabel(severityFilter)}" filter${showQuarantined ? '' : ' — quarantined findings are hidden.'}`}
+                  action={<button className="btn btn-secondary" onClick={() => { setSeverityFilter('all'); setShowQuarantined(true); }}>Clear filters</button>}
+                />
               ) : (
                 <div style={{ display: 'grid', gap: 8 }}>
                   {filteredFindings.map((f, i) => {
@@ -1050,13 +1134,13 @@ export default function Dashboard() {
               </div>
 
               {!selectedScan ? (
-                <EmptyState icon={Bot} title="No scan selected" body="Agent status appears once an engagement starts." />
+                <StateView variant="empty" icon={Bot} title="No scan selected" body="Agent status appears here once an engagement starts." />
               ) : loadingInitial ? (
                 <div className="agents-grid">
                   {Array.from({ length: 6 }).map((_, i) => <SkeletonAgentCard key={i} />)}
                 </div>
               ) : agentEntries.length === 0 ? (
-                <EmptyState icon={Activity} title="Agents waiting" body="The roster populates as the backend dispatches work." />
+                <StateView variant="empty" icon={Activity} title="Agents waiting" body="The roster populates as the backend dispatches work." />
               ) : (
                 <div style={{ display: 'grid', gap: 16 }}>
 	                  <div className="agents-grid">
@@ -1165,7 +1249,7 @@ export default function Dashboard() {
                 <div>
                   <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Readiness</h2>
                   <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    {toolCounts.total} tools configured
+                    {toolCounts.total} operational tools
                   </p>
                 </div>
               </div>
@@ -1173,45 +1257,8 @@ export default function Dashboard() {
               {/* Metric cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
                 <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
-                <MetricCard icon={Server}        label="Ready / Pullable"  value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.pullable} sub={`${toolCounts.total} configured`} tone="cyan" />
-                <MetricCard icon={AlertTriangle} label="Unavailable"       value={toolCounts.missing} sub={`${toolCounts.needsKey} need API keys`} tone={toolCounts.missing ? 'red' : 'emerald'} />
-              </div>
-
-              {/* API key panels */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
-                {API_KEY_GROUPS.map(({ label, keys }) => {
-                  const groupKey = label.toLowerCase();
-                  const statuses = apiKeyStatus?.groups?.[groupKey] || keys.map(name => ({ name, configured: false, storage: '.env / docker compose environment' }));
-                  const summary = apiKeyStatus?.summary?.[groupKey];
-                  return (
-                  <div key={label} className="card-glass" style={{ padding: 14 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginBottom: 10 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <Lock size={13} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
-                        <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--accent)' }}>{label} API Keys</span>
-                      </div>
-                      <span className="badge badge-idle">
-                        {summary ? `${summary.configured}/${summary.total}` : 'check'}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
-                      {statuses.map(k => (
-                        <span key={k.name} style={{
-                          fontFamily: 'var(--font-jetbrains), monospace', fontSize: 10,
-                          padding: '3px 8px', borderRadius: 5,
-                          border: k.configured ? '1px solid rgba(34,197,94,0.35)' : '1px solid var(--border)',
-                          background: k.configured ? 'rgba(34,197,94,0.09)' : 'var(--bg-elevated)',
-                          color: k.configured ? 'var(--low)' : 'var(--text-secondary)',
-                        }}>
-                          {k.name}{k.configured ? ' ✓' : ''}
-                        </span>
-                      ))}
-                    </div>
-                    <p style={{ marginTop: 10, fontSize: 11, color: 'var(--text-muted)' }}>
-                      Stored in Compose environment from <code style={{ fontFamily: 'var(--font-jetbrains), monospace' }}>.env</code>. Values are never returned by the API.
-                    </p>
-                  </div>
-                )})}
+                <MetricCard icon={Server}        label="Runnable Tools"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="ready for scans" tone="cyan" />
+                <MetricCard icon={Download}      label="Extension Images"  value={toolCounts.pullable} sub="available on demand" tone="amber" />
               </div>
 
               <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
@@ -1256,17 +1303,19 @@ export default function Dashboard() {
               </div>
 
               {/* Tools grid */}
-              {Object.keys(toolsStatus).length === 0 ? (
-                <EmptyState icon={Wrench} title="No tool data" body="Backend must be reachable to report tool status." />
+              {Object.keys(operationalTools).length === 0 ? (
+                apiHealthy === false ? (
+                  <StateView variant="offline" title="Backend unreachable" body="Tool status will appear once the connection to the backend is restored." onRetry={handleRefresh} />
+                ) : (
+                  <StateView variant="empty" icon={Wrench} title="No tool data" body="No tools have reported status yet." />
+                )
               ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
-                  {Object.entries(toolsStatus).map(([name, tool]) => {
+                  {Object.entries(operationalTools).map(([name, tool]) => {
                     const wu           = tool.will_use as string;
                     const availability = tool.availability as string || wu;
                     const isOk         = wu === 'docker' || wu === 'local' || wu === 'internal' || wu === 'api';
                     const isPullable   = availability === 'pullable';
-                    const isMissing    = availability === 'missing' || wu === 'unavailable';
-                    const needsKey     = wu === 'needs_api_key';
                     return (
                       <div key={name} className="tool-row">
                         <div style={{ minWidth: 0 }}>
@@ -1281,10 +1330,9 @@ export default function Dashboard() {
                           wu === 'docker' ? 'badge-informational' :
                           isPullable      ? 'badge-running' :
                           isOk            ? 'badge-completed' :
-                          needsKey        ? 'badge-running' :
-                          isMissing       ? 'badge-failed' : 'badge-idle'
+                          'badge-idle'
                         }`}>
-                          {isMissing ? 'missing' : needsKey ? 'needs key' : isPullable ? 'pullable' : wu}
+                          {isPullable ? 'pullable' : wu}
                         </span>
                       </div>
                     );
@@ -1292,6 +1340,11 @@ export default function Dashboard() {
                 </div>
               )}
             </section>
+          )}
+
+          {/* ── CONFIG TAB ─────────────────────────────────── */}
+          {activeTab === 'config' && (
+            <LLMConfigPanel />
           )}
 
         </main>
@@ -1313,6 +1366,8 @@ function agentBadgeClass(status?: string) {
 interface LaunchPanelProps {
   targetInput: string;
   setTargetInput: (v: string) => void;
+  outOfScopeInput: string;
+  setOutOfScopeInput: (v: string) => void;
   scanMode: string;
   setScanMode: (v: string) => void;
   scanName: string;
@@ -1327,6 +1382,7 @@ interface LaunchPanelProps {
 
 function LaunchPanel({
   targetInput, setTargetInput,
+  outOfScopeInput, setOutOfScopeInput,
   scanMode, setScanMode,
   scanName, setScanName,
   activeModes, selectedMode,
@@ -1363,6 +1419,22 @@ function LaunchPanel({
             aria-label="Targets (comma or newline separated)"
             style={{ resize: 'none', minHeight: 90, fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12 }}
           />
+        </label>
+
+        <label>
+          <div className="section-label" style={{ marginBottom: 6 }}>Out of scope</div>
+          <textarea
+            value={outOfScopeInput}
+            onChange={e => setOutOfScopeInput(e.target.value)}
+            placeholder={"demo.example.com, /admin\n10.0.0.20"}
+            rows={3}
+            className="field"
+            aria-label="Out-of-scope hosts, IPs, CIDRs, or paths"
+            style={{ resize: 'none', minHeight: 68, fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12 }}
+          />
+          <div style={{ marginTop: 6, fontSize: 11, color: 'var(--text-muted)', lineHeight: 1.4 }}>
+            Use <span style={{ fontFamily: 'var(--font-jetbrains), monospace' }}>*.domain.tld</span> only when subdomains are authorised for active testing.
+          </div>
         </label>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>

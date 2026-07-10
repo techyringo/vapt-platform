@@ -89,6 +89,11 @@ class ReportAgent(BaseAgent):
             logger.error("[REPORTER] No scan result provided for report generation")
             return []
 
+        # ── Dual-model review of Critical/High findings ──
+        # A second model independently validates the highest-risk findings; any
+        # it disagrees with are flagged (dual-review-failed) and excluded below.
+        await self._dual_review_critical_high(scan_result)
+
         # ── Quarantine weak-evidence findings out of the report ──
         # They remain persisted (for audit/replay) but must not pollute the
         # customer-facing report. Uses the same deterministic scorer as ingest.
@@ -129,16 +134,37 @@ class ReportAgent(BaseAgent):
         }
         return self.get_findings()
 
+    async def _dual_review_critical_high(self, scan_result: ScanResult) -> None:
+        """Independently validate Critical/High findings with a second model."""
+        llm = self._get_llm()
+        if llm is None:
+            return
+        from core.dual_review import dual_review
+
+        # Use the smaller/faster model as the independent reviewer when a distinct
+        # one is configured (e.g. gemma reviews qwen); else the primary model.
+        reviewer = getattr(llm, "_analysis_model", "") or ""
+        try:
+            await dual_review(scan_result.findings, llm, reviewer_model=reviewer)
+        except Exception as exc:
+            logger.debug("[REPORTER] Dual review skipped: {err}", err=exc)
+
     @staticmethod
     def _exclude_quarantined(scan_result: ScanResult) -> None:
-        """Drop quarantined (weak-evidence) findings from the report set.
+        """Drop quarantined (weak-evidence) and dual-review-failed findings from
+        the report set.
 
         Findings stay in the datastore; only the generated report is filtered so
-        low-quality signals never reach a customer-facing document.
+        low-quality or model-disputed signals never reach a customer-facing document.
         """
+        from core.dual_review import DISAGREE_TAG
+
         kept: list[Finding] = []
         dropped = 0
         for finding in scan_result.findings:
+            if DISAGREE_TAG in (finding.tags or []):
+                dropped += 1
+                continue
             try:
                 quality = assess_finding_quality(finding.to_report_dict())
             except Exception:
@@ -193,7 +219,7 @@ class ReportAgent(BaseAgent):
             "Write ONLY the remediation text (no preamble, no JSON, no markdown headers)."
         )
         try:
-            response = await llm.complete(prompt=prompt, temperature=0.2, max_tokens=400)
+            response = await llm.complete(prompt=prompt, temperature=0.2, max_tokens=400, task="remediation")
             text = (response.content or "").strip()
             # Strip any accidental markdown fencing
             if text.startswith("```"):
@@ -261,7 +287,7 @@ class ReportAgent(BaseAgent):
             "Write ONLY the executive summary prose (no JSON, no markdown headers)."
         )
         try:
-            response = await llm.complete(prompt=prompt, temperature=0.3, max_tokens=800)
+            response = await llm.complete(prompt=prompt, temperature=0.3, max_tokens=800, task="exec_summary")
             text = (response.content or "").strip()
             if text.startswith("```"):
                 text = text.strip("`").strip()

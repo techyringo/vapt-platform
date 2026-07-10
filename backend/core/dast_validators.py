@@ -1,0 +1,477 @@
+"""Safe DAST validators.
+
+Validators perform small, bounded probes and return proof objects. They do not
+decide reporting policy and they do not mutate scan state.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import json
+import re
+import statistics
+import time
+from dataclasses import asdict, dataclass, field
+from typing import Any
+from urllib.parse import urljoin, urlparse
+
+import httpx
+
+from core.dast_planner import DASTHypothesis, DASTPlanner
+
+
+@dataclass
+class ValidationProof:
+    hypothesis_id: str
+    vuln_type: str
+    validator: str
+    url: str
+    parameter: str
+    confirmed: bool
+    confidence: str
+    severity: str
+    title: str
+    evidence: str
+    request_proof: str = ""
+    response_proof: str = ""
+    remediation: str = ""
+    cwe_ids: list[str] = field(default_factory=list)
+    tags: list[str] = field(default_factory=list)
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+class DASTValidator:
+    """Run safe validators for DAST hypotheses."""
+
+    SQL_ERRORS = (
+        "you have an error in your sql syntax",
+        "warning: mysql",
+        "unclosed quotation mark",
+        "quoted string not properly terminated",
+        "postgresql query failed",
+        "sqlite error",
+        "ora-01756",
+        "microsoft ole db",
+        "sqlstate",
+    )
+    NOSQL_ERRORS = (
+        "mongoerror",
+        "bson",
+        "mongodb",
+        "cast to objectid failed",
+        "unknown operator",
+        "$where",
+    )
+
+    def __init__(self, *, scope: Any = None, timeout: float = 12.0) -> None:
+        self.scope = scope
+        self.timeout = timeout
+
+    async def validate_many(
+        self,
+        hypotheses: list[DASTHypothesis],
+        *,
+        max_checks: int = 40,
+        concurrency: int = 4,
+    ) -> list[ValidationProof]:
+        sem = asyncio.Semaphore(max(1, concurrency))
+        selected = hypotheses[:max(1, max_checks)]
+
+        async def run_one(hypothesis: DASTHypothesis) -> ValidationProof | None:
+            async with sem:
+                return await self.validate(hypothesis)
+
+        results = await asyncio.gather(*(run_one(item) for item in selected), return_exceptions=True)
+        proofs: list[ValidationProof] = []
+        for item in results:
+            if isinstance(item, ValidationProof):
+                proofs.append(item)
+        return proofs
+
+    async def validate(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        if not self._in_scope(hypothesis.candidate.url):
+            return None
+        validator = hypothesis.validator
+        if validator == "open_redirect":
+            return await self._validate_open_redirect(hypothesis)
+        if validator == "xss_reflection":
+            return await self._validate_xss_reflection(hypothesis)
+        if validator == "ssti_arithmetic":
+            return await self._validate_ssti(hypothesis)
+        if validator == "command_injection_timing":
+            return await self._validate_command_timing(hypothesis)
+        if validator == "sqli_error_boolean":
+            return await self._validate_sqli(hypothesis)
+        if validator == "nosqli_error":
+            return await self._validate_nosqli(hypothesis)
+        if validator == "lfi_known_file":
+            return await self._validate_lfi(hypothesis)
+        if validator == "sourcemap_exposure":
+            return await self._validate_sourcemap_exposure(hypothesis)
+        if validator == "jwt_alg_none":
+            return await self._validate_jwt_alg_none(hypothesis)
+        return None
+
+    async def _validate_open_redirect(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        payload = "https://example.invalid/vapt-open-redirect-proof"
+        test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+        async with self._client(follow_redirects=False) as client:
+            resp = await client.get(test_url)
+        location = resp.headers.get("location", "")
+        confirmed = location.startswith(payload)
+        if not confirmed:
+            return None
+        return ValidationProof(
+            hypothesis_id=hypothesis.id,
+            vuln_type="open_redirect",
+            validator=hypothesis.validator,
+            url=test_url,
+            parameter=hypothesis.candidate.parameter,
+            confirmed=True,
+            confidence="high",
+            severity="medium",
+            title="Open Redirect With External Location Proof",
+            evidence=f"HTTP {resp.status_code} returned Location: {location}",
+            request_proof=f"GET {test_url}",
+            response_proof=f"HTTP {resp.status_code}\nLocation: {location}",
+            remediation="Validate redirect destinations against an allowlist and prefer relative redirect paths.",
+            cwe_ids=["CWE-601"],
+            tags=["dast-proof", "open-redirect", "safe-validation"],
+        )
+
+    async def _validate_xss_reflection(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        marker = f"vaptxss{hypothesis.id.replace('_', '')}"
+        payload = f'"><svg data-vapt="{marker}">'
+        test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+        async with self._client(follow_redirects=True) as client:
+            resp = await client.get(test_url)
+        body = resp.text or ""
+        confirmed = payload in body or f'data-vapt="{marker}"' in body
+        if not confirmed:
+            return None
+        return ValidationProof(
+            hypothesis_id=hypothesis.id,
+            vuln_type="xss",
+            validator=hypothesis.validator,
+            url=test_url,
+            parameter=hypothesis.candidate.parameter,
+            confirmed=True,
+            confidence="high",
+            severity="medium",
+            title="Reflected XSS Payload Returned Unencoded",
+            evidence=f"Payload marker `{marker}` was reflected into the HTML response without encoding.",
+            request_proof=f"GET {test_url}",
+            response_proof=self._excerpt(body, marker),
+            remediation="Contextually encode reflected user input and apply a restrictive Content Security Policy.",
+            cwe_ids=["CWE-79"],
+            tags=["dast-proof", "xss", "reflected", "safe-validation"],
+        )
+
+    async def _validate_ssti(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        payloads = ["{{7*7}}", "${7*7}", "<%= 7*7 %>"]
+        async with self._client(follow_redirects=True) as client:
+            baseline = await client.get(hypothesis.candidate.url)
+            baseline_text = baseline.text or ""
+            for payload in payloads:
+                test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+                resp = await client.get(test_url)
+                body = resp.text or ""
+                if "49" in body and "49" not in baseline_text:
+                    return ValidationProof(
+                        hypothesis_id=hypothesis.id,
+                        vuln_type="ssti",
+                        validator=hypothesis.validator,
+                        url=test_url,
+                        parameter=hypothesis.candidate.parameter,
+                        confirmed=True,
+                        confidence="high",
+                        severity="high",
+                        title="Server-Side Template Injection Arithmetic Proof",
+                        evidence=f"Template payload `{payload}` evaluated to `49` in the response.",
+                        request_proof=f"GET {test_url}",
+                        response_proof=self._excerpt(body, "49"),
+                        remediation="Avoid rendering user-controlled input as templates. Use sandboxing and strict allowlists for template variables.",
+                        cwe_ids=["CWE-1336"],
+                        tags=["dast-proof", "ssti", "safe-validation"],
+                    )
+        return None
+
+    async def _validate_command_timing(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        # Timing-only proof; no command output retrieval.
+        delay = 4.0
+        payloads = [f"127.0.0.1;sleep {int(delay)}", f"127.0.0.1&&sleep {int(delay)}"]
+        async with self._client(follow_redirects=True, timeout=max(self.timeout, delay + 6)) as client:
+            baseline_samples = []
+            for _ in range(2):
+                started = time.monotonic()
+                await client.get(hypothesis.candidate.url)
+                baseline_samples.append(time.monotonic() - started)
+            baseline = statistics.mean(baseline_samples)
+
+            for payload in payloads:
+                test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+                samples = []
+                for _ in range(2):
+                    started = time.monotonic()
+                    try:
+                        await client.get(test_url)
+                    except httpx.ReadTimeout:
+                        samples.append(delay + 2)
+                        continue
+                    samples.append(time.monotonic() - started)
+                observed = statistics.mean(samples)
+                if observed >= baseline + 3.0 and observed >= delay - 0.5:
+                    return ValidationProof(
+                        hypothesis_id=hypothesis.id,
+                        vuln_type="command_injection",
+                        validator=hypothesis.validator,
+                        url=test_url,
+                        parameter=hypothesis.candidate.parameter,
+                        confirmed=True,
+                        confidence="high",
+                        severity="critical",
+                        title="OS Command Injection Timing Proof",
+                        evidence=(
+                            f"Baseline avg response time {baseline:.2f}s; timing payload avg "
+                            f"{observed:.2f}s using a non-output `sleep` probe."
+                        ),
+                        request_proof=f"GET {test_url}",
+                        response_proof=f"Timing delta observed: baseline={baseline:.2f}s delayed={observed:.2f}s",
+                        remediation="Never concatenate user input into shell commands. Use safe library APIs and strict allowlists for host/domain parameters.",
+                        cwe_ids=["CWE-78"],
+                        tags=["dast-proof", "command-injection", "timing-proof", "safe-validation"],
+                    )
+        return None
+
+    async def _validate_sqli(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        payloads = ["'", "\"", "' OR '1'='1", "' AND '1'='2"]
+        async with self._client(follow_redirects=True) as client:
+            baseline = await client.get(hypothesis.candidate.url)
+            baseline_text = (baseline.text or "").lower()
+            for payload in payloads[:2]:
+                test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+                resp = await client.get(test_url)
+                text = (resp.text or "").lower()
+                matched = next((err for err in self.SQL_ERRORS if err in text and err not in baseline_text), "")
+                if matched:
+                    return ValidationProof(
+                        hypothesis_id=hypothesis.id,
+                        vuln_type="sqli",
+                        validator=hypothesis.validator,
+                        url=test_url,
+                        parameter=hypothesis.candidate.parameter,
+                        confirmed=True,
+                        confidence="high",
+                        severity="high",
+                        title="SQL Injection Error-Based Proof",
+                        evidence=f"SQL error signature `{matched}` appeared only after injecting a quote payload.",
+                        request_proof=f"GET {test_url}",
+                        response_proof=self._excerpt(resp.text or "", matched),
+                        remediation="Use parameterized queries/prepared statements and avoid building SQL from user-controlled strings.",
+                        cwe_ids=["CWE-89"],
+                        tags=["dast-proof", "sqli", "error-based", "safe-validation"],
+                    )
+        return None
+
+    async def _validate_nosqli(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        payloads = ['{"$ne":null}', '{"$gt":""}', '[$ne]=null']
+        async with self._client(follow_redirects=True) as client:
+            baseline = await client.get(hypothesis.candidate.url)
+            baseline_text = (baseline.text or "").lower()
+            for payload in payloads:
+                test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+                resp = await client.get(test_url)
+                text = (resp.text or "").lower()
+                matched = next((err for err in self.NOSQL_ERRORS if err in text and err not in baseline_text), "")
+                if matched:
+                    return ValidationProof(
+                        hypothesis_id=hypothesis.id,
+                        vuln_type="nosqli",
+                        validator=hypothesis.validator,
+                        url=test_url,
+                        parameter=hypothesis.candidate.parameter,
+                        confirmed=True,
+                        confidence="high",
+                        severity="high",
+                        title="NoSQL Injection Error-Based Proof",
+                        evidence=f"NoSQL/database error signature `{matched}` appeared after operator-style input.",
+                        request_proof=f"GET {test_url}",
+                        response_proof=self._excerpt(resp.text or "", matched),
+                        remediation="Parse and validate typed input server-side; do not pass user-controlled objects/operators directly into NoSQL queries.",
+                        cwe_ids=["CWE-943"],
+                        tags=["dast-proof", "nosqli", "error-based", "safe-validation"],
+                    )
+        return None
+
+    async def _validate_lfi(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        payloads = ["../../../../../../etc/passwd", "..%2f..%2f..%2f..%2fetc%2fpasswd"]
+        async with self._client(follow_redirects=True) as client:
+            for payload in payloads:
+                test_url = DASTPlanner.replace_param(hypothesis.candidate.url, hypothesis.candidate.parameter, payload)
+                resp = await client.get(test_url)
+                body = resp.text or ""
+                if "root:x:0:0:" in body:
+                    return ValidationProof(
+                        hypothesis_id=hypothesis.id,
+                        vuln_type="lfi",
+                        validator=hypothesis.validator,
+                        url=test_url,
+                        parameter=hypothesis.candidate.parameter,
+                        confirmed=True,
+                        confidence="high",
+                        severity="high",
+                        title="Local File Inclusion / Path Traversal Proof",
+                        evidence="The response contained `/etc/passwd` content marker `root:x:0:0:`.",
+                        request_proof=f"GET {test_url}",
+                        response_proof=self._excerpt(body, "root:x:0:0:"),
+                        remediation="Canonicalize paths, enforce a strict file allowlist, and block traversal sequences before file access.",
+                        cwe_ids=["CWE-22"],
+                        tags=["dast-proof", "lfi", "path-traversal", "safe-validation"],
+                    )
+        return None
+
+    async def _validate_sourcemap_exposure(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        js_url = hypothesis.candidate.url
+        candidates: list[str] = []
+        async with self._client(follow_redirects=True) as client:
+            try:
+                js_resp = await client.get(js_url)
+            except Exception:
+                return None
+            body = js_resp.text or ""
+            for match in re.finditer(r"sourceMappingURL=([^\s*]+)", body, re.I):
+                value = match.group(1).strip().strip("'\"")
+                if value and not value.startswith("data:"):
+                    candidates.append(urljoin(js_url, value))
+            if js_url.endswith(".js"):
+                candidates.append(f"{js_url}.map")
+
+            seen: set[str] = set()
+            for map_url in candidates:
+                if map_url in seen or not self._in_scope(map_url):
+                    continue
+                seen.add(map_url)
+                try:
+                    resp = await client.get(map_url)
+                except Exception:
+                    continue
+                if resp.status_code != 200:
+                    continue
+                try:
+                    payload = resp.json()
+                except json.JSONDecodeError:
+                    continue
+                sources = payload.get("sources")
+                if not isinstance(sources, list) or not sources:
+                    continue
+                if "mappings" not in payload and "sourcesContent" not in payload:
+                    continue
+                sample_sources = [str(item) for item in sources[:5]]
+                return ValidationProof(
+                    hypothesis_id=hypothesis.id,
+                    vuln_type="source_map_exposure",
+                    validator=hypothesis.validator,
+                    url=map_url,
+                    parameter=hypothesis.candidate.parameter,
+                    confirmed=True,
+                    confidence="high",
+                    severity="medium",
+                    title="Exposed JavaScript Source Map",
+                    evidence=(
+                        f"Source map is publicly reachable and references {len(sources)} source file(s): "
+                        + ", ".join(sample_sources)
+                    ),
+                    request_proof=f"GET {map_url}",
+                    response_proof=json.dumps({
+                        "version": payload.get("version"),
+                        "file": payload.get("file"),
+                        "sources_sample": sample_sources,
+                        "has_sources_content": bool(payload.get("sourcesContent")),
+                    }, ensure_ascii=True),
+                    remediation="Do not publish production source maps unless intentionally required. Restrict access or omit sourcesContent from public builds.",
+                    cwe_ids=["CWE-540"],
+                    tags=["dast-proof", "source-map", "javascript", "safe-validation"],
+                )
+        return None
+
+    async def _validate_jwt_alg_none(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        url = hypothesis.candidate.url
+        async with self._client(follow_redirects=True) as client:
+            try:
+                resp = await client.get(url)
+            except Exception:
+                return None
+        haystacks = [resp.text or ""]
+        haystacks.extend(str(value) for value in resp.headers.values())
+        for text in haystacks:
+            for token in re.findall(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\b", text):
+                header = self._decode_jwt_header(token)
+                if not header:
+                    continue
+                alg = str(header.get("alg") or "").lower()
+                if alg != "none":
+                    continue
+                redacted = f"{token[:18]}...{token[-8:]}" if len(token) > 32 else token
+                return ValidationProof(
+                    hypothesis_id=hypothesis.id,
+                    vuln_type="jwt",
+                    validator=hypothesis.validator,
+                    url=url,
+                    parameter=hypothesis.candidate.parameter,
+                    confirmed=True,
+                    confidence="high",
+                    severity="high",
+                    title="JWT Uses alg=none",
+                    evidence=f"A JWT returned by the application declares alg=none. Token sample: {redacted}",
+                    request_proof=f"GET {url}",
+                    response_proof=json.dumps({"jwt_header": header, "token_sample": redacted}, ensure_ascii=True),
+                    remediation="Reject unsigned JWTs, enforce an explicit signing algorithm allowlist, and verify signatures server-side on every request.",
+                    cwe_ids=["CWE-347"],
+                    tags=["dast-proof", "jwt", "alg-none", "safe-validation"],
+                )
+        return None
+
+    def _client(self, *, follow_redirects: bool, timeout: float | None = None) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            verify=False,
+            timeout=timeout or self.timeout,
+            follow_redirects=follow_redirects,
+            headers={"User-Agent": "Mozilla/5.0 VAPT-ProofEngine"},
+        )
+
+    def _in_scope(self, url: str) -> bool:
+        if self.scope is None:
+            return True
+        try:
+            return bool(self.scope.is_in_scope(url))
+        except Exception:
+            parsed = urlparse(url)
+            return bool(parsed.scheme and parsed.netloc)
+
+    @staticmethod
+    def _excerpt(text: str, marker: str, radius: int = 450) -> str:
+        if not text:
+            return ""
+        lower = text.lower()
+        marker_l = marker.lower()
+        idx = lower.find(marker_l)
+        if idx < 0:
+            return text[: radius * 2]
+        start = max(0, idx - radius)
+        end = min(len(text), idx + len(marker) + radius)
+        return text[start:end]
+
+    @staticmethod
+    def _decode_jwt_header(token: str) -> dict[str, Any] | None:
+        try:
+            raw_header = token.split(".", 1)[0]
+            padded = raw_header + "=" * (-len(raw_header) % 4)
+            decoded = base64.urlsafe_b64decode(padded.encode("ascii"))
+            payload = json.loads(decoded.decode("utf-8", errors="strict"))
+            return payload if isinstance(payload, dict) else None
+        except Exception:
+            return None

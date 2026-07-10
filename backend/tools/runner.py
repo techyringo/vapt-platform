@@ -335,16 +335,29 @@ def redact_command(cmd: list[str]) -> str:
             redacted.append(text)
             redact_next = True
             continue
-        if any(marker in lower for marker in ("api_key=", "api-token=", "token=", "secret=", "password=")):
-            key = text.split("=", 1)[0]
-            redacted.append(f"{key}=<redacted>")
-            continue
-        if lower.startswith(("-e", "--env")) and "=" in text and any(marker in lower for marker in ("api", "key", "token", "secret", "password")):
+        if _looks_sensitive_assignment(text):
             key = text.split("=", 1)[0]
             redacted.append(f"{key}=<redacted>")
             continue
         redacted.append(text)
     return " ".join(redacted)
+
+
+def _looks_sensitive_assignment(text: str) -> bool:
+    if "=" not in text:
+        return False
+    key = text.split("=", 1)[0].strip().lower().replace("-", "_")
+    sensitive_markers = (
+        "api",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "auth",
+        "credential",
+        "private_key",
+    )
+    return any(marker in key for marker in sensitive_markers)
 
 
 # ─── DockerRunner ─────────────────────────────────────────────────────────────
@@ -1220,6 +1233,17 @@ class OutputParser:
                 if "|" in line and any(kw in line for kw in ("WordPress", "vulnerability", "plugin", "version")):
                     results.append({"finding": line.strip(), "component": "wordpress", "informational": True})
             return results
+
+        aborted = str(data.get("scan_aborted") or "")
+        if aborted:
+            return [{
+                "finding": f"WPScan aborted: {aborted}",
+                "component": "wordpress",
+                "target_url": data.get("target_url", ""),
+                "informational": True,
+                "reportable": False,
+                "raw": {"scan_aborted": aborted},
+            }]
 
         # ── 1. WordPress core version ─────────────────────────────────────
         version_data = data.get("version") or {}

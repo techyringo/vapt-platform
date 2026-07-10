@@ -34,6 +34,18 @@ import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
+from urllib.parse import urlparse, urlunparse
+
+from core.llm_budget import budget_prompt
+
+# Task categories for model routing. Triage-class tasks go to the smaller/faster
+# model (analysis_model, e.g. gemma); reasoning/report tasks go to the stronger
+# model (report_model, e.g. qwen). Unknown tasks use the provider's own model.
+_TRIAGE_TASKS = {"triage", "classify", "classification", "dedup", "categorize", "fast"}
+_REASON_TASKS = {
+    "reason", "reasoning", "remediation", "report", "summary", "exec_summary",
+    "cve", "cwe", "analysis", "dual_review",
+}
 
 
 class LLMProvider(str, Enum):
@@ -46,6 +58,7 @@ class LLMProvider(str, Enum):
     GROQ = "groq"
     TOGETHER = "together"
     OPENAI_COMPAT = "openai_compat"  # vLLM, text-generation-webui, etc.
+    HTTP_BASIC_CHAT = "http_basic_chat"  # Basic Auth /chat endpoint returning message.content
 
 
 @dataclass
@@ -98,6 +111,9 @@ class ProviderConfig:
     temperature: float = 0.3
     timeout: int = 120
     enabled: bool = True
+    verify_ssl: bool = True
+    chat_path: str = "/chat"
+    models_path: str = "/models"
     # Provider-specific
     organization_id: str = ""  # OpenAI org
     project_id: str = ""       # Azure project
@@ -119,8 +135,23 @@ class LLMClient:
         self._cache: dict[str, LLMResponse] = {}
         self._rate_limits: dict[str, list[float]] = {}
         self._request_counts: dict[str, int] = {}
-        self._enabled = self._env_truthy("VAPT_LLM_ENABLED", default=False)
-        self._allow_fallbacks = self._env_truthy("VAPT_LLM_ALLOW_FALLBACKS", default=False)
+
+        # Runtime overlay FIRST: persisted frontend-configured LLM settings
+        # (provider/model/base_url/api_key/fallbacks/toggles) take precedence
+        # over config.yaml + env, so the model is never hardcoded. Idempotent
+        # and shared across API + worker containers via the data volume.
+        if config:
+            from core.runtime_config import apply_runtime_llm_overlay
+            apply_runtime_llm_overlay(config)
+
+        # enabled / allow_fallbacks: prefer the (now-overlaid) config value,
+        # else fall back to the VAPT_LLM_* env vars.
+        self._enabled = self._resolve_flag(config, "enabled", "VAPT_LLM_ENABLED", default=False)
+        self._allow_fallbacks = self._resolve_flag(config, "allow_fallbacks", "VAPT_LLM_ALLOW_FALLBACKS", default=False)
+        # Task→model routing: small/fast model for triage, stronger model for
+        # reasoning/reporting. Populated from config (analysis_model/report_model).
+        self._analysis_model: str = ""
+        self._report_model: str = ""
 
         if config:
             self._load_from_config(config)
@@ -134,22 +165,67 @@ class LLMClient:
             return default
         return value.strip().lower() in {"1", "true", "yes", "on"}
 
+    @staticmethod
+    def _resolve_flag(config: Any, attr: str, env_name: str, default: bool) -> bool:
+        """Precedence: config.llm.<attr> (if not None) > env var > default.
+
+        Lets the frontend toggle ``enabled`` / ``allow_fallbacks`` at runtime
+        while still honouring the legacy VAPT_LLM_* env vars.
+        """
+        if config is not None:
+            val = getattr(getattr(config, "llm", None), attr, None)
+            if val is not None:
+                return bool(val)
+        return LLMClient._env_truthy(env_name, default)
+
+    @staticmethod
+    def _provider_key(pc: "ProviderConfig") -> str:
+        """Unique registry key: ``"<provider>:<model>"``.
+
+        Required so multiple models from the SAME provider (e.g. several
+        Ollama-served models: qwen2.5:32b, qwen2.5:14b, gemma) can coexist in
+        the fallback chain instead of collapsing to a single entry.
+        """
+        return f"{pc.provider.value}:{pc.model}"
+
+    def _resolve_provider_key(self, provider: Optional[str]) -> Optional[str]:
+        """Map a bare provider name (e.g. ``"openai"``) to a registry key.
+
+        Callers may still pass a bare provider name; this resolves it to the
+        first matching ``"<provider>:<model>"`` key so explicit-provider use
+        keeps working under the new keying.
+        """
+        if not provider:
+            return None
+        if provider in self._providers:
+            return provider
+        matches = [k for k in self._fallback_chain if k.split(":", 1)[0] == provider]
+        return matches[0] if matches else provider
+
     def _load_from_config(self, config: Any) -> None:
         """Load provider configs from AppConfig LLM section."""
         llm = config.llm
 
-        # Primary provider
+        # Task routing models (default to the primary model when unset).
+        self._analysis_model = getattr(llm, "analysis_model", "") or llm.model
+        self._report_model = getattr(llm, "report_model", "") or llm.model
+
+        # Primary provider. Registered under "<provider>:<model>" so that the
+        # fallback chain can hold several models from the same provider.
         primary = ProviderConfig(
             provider=LLMProvider(llm.provider),
             model=llm.model,
             api_key_env=llm.api_key_env,
+            api_key=getattr(llm, "api_key", ""),
             base_url=getattr(llm, "base_url", ""),
+            verify_ssl=getattr(llm, "verify_ssl", True),
             max_tokens=llm.max_tokens,
             temperature=llm.temperature,
             enabled=True,
         )
-        self._providers[llm.provider] = primary
-        self._fallback_chain.append(llm.provider)
+        primary_key = self._provider_key(primary)
+        self._providers[primary_key] = primary
+        self._fallback_chain.append(primary_key)
 
         # Load additional providers from config if present
         extra_providers = getattr(llm, "fallback_providers", None)
@@ -157,35 +233,43 @@ class LLMClient:
             for prov_cfg in extra_providers:
                 if isinstance(prov_cfg, dict):
                     name = prov_cfg.get("provider", "")
-                    if name and name not in self._providers:
+                    model = prov_cfg.get("model", "default")
+                    key = f"{name}:{model}"
+                    if name and key not in self._providers:
                         pc = ProviderConfig(
                             provider=LLMProvider(name),
-                            model=prov_cfg.get("model", "default"),
+                            model=model,
                             api_key_env=prov_cfg.get("api_key_env", ""),
                             api_key=prov_cfg.get("api_key", ""),
                             base_url=prov_cfg.get("base_url", ""),
                             max_tokens=prov_cfg.get("max_tokens", 4096),
                             temperature=prov_cfg.get("temperature", 0.3),
                             enabled=prov_cfg.get("enabled", True),
+                            verify_ssl=prov_cfg.get("verify_ssl", True),
+                            chat_path=prov_cfg.get("chat_path", "/chat"),
+                            models_path=prov_cfg.get("models_path", "/models"),
                             organization_id=prov_cfg.get("organization_id", ""),
                             project_id=prov_cfg.get("project_id", ""),
                             deployment_id=prov_cfg.get("deployment_id", ""),
                         )
-                        self._providers[name] = pc
-                        self._fallback_chain.append(name)
+                        self._providers[key] = pc
+                        self._fallback_chain.append(key)
 
-        # Always add Ollama as last fallback (local, free)
-        if "ollama" not in self._providers:
-            self._providers["ollama"] = ProviderConfig(
+        # Always add an Ollama fallback (local, free) if none is configured.
+        if not any(k.split(":", 1)[0] == "ollama" for k in self._fallback_chain):
+            pc = ProviderConfig(
                 provider=LLMProvider.OLLAMA,
                 model="llama3",
                 base_url="http://localhost:11434",
                 enabled=True,
             )
-            self._fallback_chain.append("ollama")
+            self._providers[self._provider_key(pc)] = pc
+            self._fallback_chain.append(self._provider_key(pc))
 
     def _load_defaults(self) -> None:
         """Load sensible defaults when no config provided."""
+        self._analysis_model = "gpt-4o"
+        self._report_model = "gpt-4o"
         self._providers["openai"] = ProviderConfig(
             provider=LLMProvider.OPENAI,
             model="gpt-4o",
@@ -202,11 +286,42 @@ class LLMClient:
         )
         self._fallback_chain = ["openai", "ollama"]
 
+    @staticmethod
+    def _strip_endpoint_path(base_url: str, suffixes: tuple[str, ...]) -> str:
+        """Accept either a provider base URL or a full endpoint URL."""
+        raw = (base_url or "").rstrip("/")
+        if not raw:
+            return ""
+        parsed = urlparse(raw)
+        path = parsed.path.rstrip("/")
+        for suffix in suffixes:
+            suffix = suffix.rstrip("/")
+            if path == suffix or path.endswith(suffix):
+                new_path = path[: -len(suffix)].rstrip("/")
+                return urlunparse(parsed._replace(path=new_path, params="", query="", fragment="")).rstrip("/")
+        return raw
+
+    @classmethod
+    def _normalise_openai_compat_base(cls, base_url: str) -> str:
+        return cls._strip_endpoint_path(
+            base_url,
+            ("/v1/chat/completions", "/v1/completions", "/v1/models", "/v1"),
+        )
+
+    @classmethod
+    def _normalise_ollama_base(cls, base_url: str) -> str:
+        return cls._strip_endpoint_path(base_url, ("/api/generate", "/api/chat", "/api/tags"))
+
+    @classmethod
+    def _normalise_basic_chat_base(cls, base_url: str) -> str:
+        return cls._strip_endpoint_path(base_url, ("/chat", "/models"))
+
     def add_provider(self, config: ProviderConfig) -> None:
         """Add or override a provider configuration."""
-        self._providers[config.provider.value] = config
-        if config.provider.value not in self._fallback_chain:
-            self._fallback_chain.append(config.provider.value)
+        key = self._provider_key(config)
+        self._providers[key] = config
+        if key not in self._fallback_chain:
+            self._fallback_chain.append(key)
 
     def get_available_providers(self) -> list[str]:
         """Return list of providers that have API keys configured."""
@@ -225,9 +340,29 @@ class LLMClient:
                 available.append(name)
             elif pc.provider == LLMProvider.OPENAI_COMPAT and pc.base_url:
                 available.append(name)
+            elif pc.provider == LLMProvider.HTTP_BASIC_CHAT and pc.base_url:
+                if pc.api_key or os.environ.get(pc.api_key_env, ""):
+                    available.append(name)
             elif pc.api_key or os.environ.get(pc.api_key_env, ""):
                 available.append(name)
         return available
+
+    def _route_model(self, task: str, prov_name: str, pc: "ProviderConfig") -> str:
+        """Pick the model for a task. Routing applies only to the PRIMARY
+        provider (where analysis_model/report_model are meaningful); fallback
+        providers keep their own configured model so a routed local model name
+        is never sent to a cloud provider that lacks it."""
+        default_model = pc.model
+        if not task or not self._fallback_chain:
+            return default_model
+        if prov_name != self._fallback_chain[0]:
+            return default_model
+        t = task.lower().strip()
+        if t in _TRIAGE_TASKS and self._analysis_model:
+            return self._analysis_model
+        if t in _REASON_TASKS and self._report_model:
+            return self._report_model
+        return default_model
 
     async def complete(
         self,
@@ -239,6 +374,7 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         json_mode: bool = False,
         use_fallback: bool = True,
+        task: str = "",
     ) -> LLMResponse:
         """Send a prompt to an LLM and get a response.
 
@@ -272,7 +408,7 @@ class LLMClient:
 
         # Determine provider order
         if provider:
-            providers_to_try = [provider]
+            providers_to_try = [self._resolve_provider_key(provider) or provider]
         else:
             providers_to_try = (
                 self._fallback_chain
@@ -284,6 +420,7 @@ class LLMClient:
         for prov_name in providers_to_try:
             pc = self._providers.get(prov_name)
             if not pc or not pc.enabled:
+                last_error = f"Provider not configured or disabled: {prov_name}"
                 continue
 
             # Check rate limit
@@ -296,15 +433,25 @@ class LLMClient:
                 if not api_key:
                     continue
 
-            # Resolve model
-            effective_model = model or pc.model
+            # Resolve model (explicit override > task routing > provider default)
+            effective_model = model or self._route_model(task, prov_name, pc)
             effective_temp = temperature if temperature is not None else pc.temperature
             effective_max = max_tokens or pc.max_tokens
+
+            # Budget the prompt against the model's context window so small local
+            # models (qwen/gemma) never silently overflow. Trims only if needed.
+            budgeted_prompt, budget_meta = budget_prompt(
+                prompt,
+                system_prompt=system_prompt,
+                model=effective_model,
+                reserved_output=effective_max,
+                explicit_ctx=getattr(pc, "context_window", None),
+            )
 
             try:
                 response = await self._call_provider(
                     pc=pc,
-                    prompt=prompt,
+                    prompt=budgeted_prompt,
                     system_prompt=system_prompt,
                     model=effective_model,
                     temperature=effective_temp,
@@ -312,12 +459,12 @@ class LLMClient:
                     json_mode=json_mode,
                 )
 
-                if response and not response.error:
+                if response and not response.error and response.content.strip():
                     self._cache[cache_key] = response
                     self._track_request(prov_name)
                     return response
                 else:
-                    last_error = response.error if response else "No response"
+                    last_error = response.error if response and response.error else "Empty response"
 
             except Exception as exc:
                 last_error = str(exc)
@@ -335,6 +482,7 @@ class LLMClient:
         prompt: str,
         context: str = "",
         provider: Optional[str] = None,
+        task: str = "analysis",
     ) -> Optional[dict]:
         """Convenience method: send a prompt and parse JSON response.
 
@@ -366,6 +514,7 @@ class LLMClient:
             system_prompt=system,
             provider=provider,
             json_mode=True,
+            task=task,
         )
 
         parsed = response.json_content()
@@ -420,6 +569,8 @@ class LLMClient:
             result = await self._call_together(pc, prompt, system_prompt, model, temperature, max_tokens, json_mode)
         elif pc.provider == LLMProvider.OPENAI_COMPAT:
             result = await self._call_openai_compat(pc, prompt, system_prompt, model, temperature, max_tokens, json_mode)
+        elif pc.provider == LLMProvider.HTTP_BASIC_CHAT:
+            result = await self._call_http_basic_chat(pc, prompt, system_prompt, model, temperature, max_tokens, json_mode)
         else:
             result = LLMResponse(content="", provider=pc.provider.value, model=model, error=f"Unknown provider: {pc.provider}")
 
@@ -579,6 +730,7 @@ class LLMClient:
             return LLMResponse(content="", provider="ollama", model=model, error="httpx not installed")
 
         base_url = pc.base_url or "http://localhost:11434"
+        base_url = self._normalise_ollama_base(base_url)
 
         body: dict[str, Any] = {
             "model": model,
@@ -775,6 +927,8 @@ class LLMClient:
         if not pc.base_url:
             return LLMResponse(content="", provider="openai_compat", model=model, error="base_url required for openai_compat")
 
+        base_url = self._normalise_openai_compat_base(pc.base_url)
+
         headers = {
             "Content-Type": "application/json",
         }
@@ -797,17 +951,29 @@ class LLMClient:
             body["response_format"] = {"type": "json_object"}
 
         try:
-            async with httpx.AsyncClient(timeout=pc.timeout) as client:
-                resp = await client.post(f"{pc.base_url}/v1/chat/completions", headers=headers, json=body)
+            async with httpx.AsyncClient(timeout=pc.timeout, verify=pc.verify_ssl) as client:
+                resp = await client.post(f"{base_url}/v1/chat/completions", headers=headers, json=body)
+                if resp.status_code in (404, 405):
+                    completion_body = {
+                        "model": model,
+                        "prompt": f"{system_prompt}\n\n{prompt}" if system_prompt else prompt,
+                        "temperature": temp,
+                        "max_tokens": max_tok,
+                    }
+                    resp = await client.post(f"{base_url}/v1/completions", headers=headers, json=completion_body)
                 if resp.status_code != 200:
                     return LLMResponse(content="", provider="openai_compat", model=model, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
 
                 data = resp.json()
-                msg = data.get("choices", [{}])[0].get("message", {})
+                choice = data.get("choices", [{}])[0]
+                msg = choice.get("message", {})
                 usage = data.get("usage", {})
+                content = msg.get("content", "") if isinstance(msg, dict) else ""
+                if not content:
+                    content = choice.get("text", "")
 
                 return LLMResponse(
-                    content=msg.get("content", ""),
+                    content=content,
                     provider="openai_compat",
                     model=data.get("model", model),
                     tokens_prompt=usage.get("prompt_tokens", 0),
@@ -815,6 +981,84 @@ class LLMClient:
                 )
         except Exception as e:
             return LLMResponse(content="", provider="openai_compat", model=model, error=str(e))
+
+    async def _call_http_basic_chat(self, pc: ProviderConfig, prompt: str, system_prompt: str,
+                                    model: str, temp: float, max_tok: int, json_mode: bool) -> LLMResponse:
+        """HTTP Basic Auth chat API with an Ollama-like response shape.
+
+        Expected request:
+            POST /chat {"model": "...", "messages": [{"role": "user", "content": "..."}]}
+
+        Expected response:
+            {"message": {"role": "assistant", "content": "..."}, ...}
+        """
+        try:
+            import httpx
+        except ImportError:
+            return LLMResponse(content="", provider="http_basic_chat", model=model, error="httpx not installed")
+
+        if not pc.base_url:
+            return LLMResponse(content="", provider="http_basic_chat", model=model, error="base_url required")
+
+        auth_value = pc.api_key or os.environ.get(pc.api_key_env, "")
+        if not auth_value or ":" not in auth_value:
+            return LLMResponse(
+                content="",
+                provider="http_basic_chat",
+                model=model,
+                error=f"{pc.api_key_env or 'api_key'} must be set as 'username:password'",
+            )
+        username, password = auth_value.split(":", 1)
+
+        messages = []
+        if system_prompt:
+            messages.append({"role": "system", "content": system_prompt})
+        messages.append({"role": "user", "content": prompt})
+
+        body: dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temp,
+            "max_tokens": max_tok,
+        }
+        if json_mode:
+            body["format"] = "json"
+
+        base_url = self._normalise_basic_chat_base(pc.base_url)
+        chat_path = pc.chat_path if pc.chat_path.startswith("/") else f"/{pc.chat_path}"
+        models_path = pc.models_path if pc.models_path.startswith("/") else f"/{pc.models_path}"
+
+        try:
+            async with httpx.AsyncClient(timeout=pc.timeout, verify=pc.verify_ssl) as client:
+                models_resp = await client.get(f"{base_url}{models_path}", auth=(username, password))
+                if models_resp.status_code != 200:
+                    return LLMResponse(
+                        content="",
+                        provider="http_basic_chat",
+                        model=model,
+                        error=f"models HTTP {models_resp.status_code}: {models_resp.text[:200]}",
+                    )
+
+                resp = await client.post(f"{base_url}{chat_path}", auth=(username, password), json=body)
+                if resp.status_code != 200:
+                    return LLMResponse(
+                        content="",
+                        provider="http_basic_chat",
+                        model=model,
+                        error=f"chat HTTP {resp.status_code}: {resp.text[:200]}",
+                    )
+
+                data = resp.json()
+                message = data.get("message", {}) if isinstance(data, dict) else {}
+                return LLMResponse(
+                    content=message.get("content", "") if isinstance(message, dict) else "",
+                    provider="http_basic_chat",
+                    model=data.get("model", model) if isinstance(data, dict) else model,
+                    tokens_prompt=data.get("prompt_eval_count", 0) if isinstance(data, dict) else 0,
+                    tokens_completion=data.get("eval_count", 0) if isinstance(data, dict) else 0,
+                )
+        except Exception as e:
+            return LLMResponse(content="", provider="http_basic_chat", model=model, error=str(e))
 
     # ────────────────────────────────────────────────────────────────
     # Rate Limiting & Tracking

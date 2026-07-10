@@ -427,9 +427,16 @@ llm:
   max_tokens: 4096
   api_key_env: "OPENAI_API_KEY"
 
-  # For intelligent analysis (can use a cheaper/faster model)
+  # Task→model routing (used when a task tag is set on the LLM call):
+  #   analysis_model → triage/classification (fast, small model)
+  #   report_model   → remediation, exec summary, CVE/CWE reasoning, dual-review
+  # Local-first example (Ollama qwen + gemma):
+  #   provider: "ollama"
+  #   model: "qwen2.5:7b"          # provider default
+  #   analysis_model: "gemma2:9b"  # fast triage + independent dual-review reviewer
+  #   report_model:   "qwen2.5:7b" # stronger reasoning/report model
+  #   base_url: "http://host.docker.internal:11434"
   analysis_model: "gpt-4o"
-  # For report writing (can use a different model)
   report_model: "gpt-4o"
 
   # Fallback providers — tried in order if primary fails
@@ -451,6 +458,16 @@ llm:
       api_key_env: "GROQ_API_KEY"
       max_tokens: 4096
       temperature: 0.3
+
+    - provider: "http_basic_chat"
+      model: "llama3.2"
+      base_url: "https://10.1.96.96:8443"
+      api_key_env: "MANTHAN_BASIC_AUTH"
+      verify_ssl: false
+      chat_path: "/chat"
+      models_path: "/models"
+      max_tokens: 2048
+      temperature: 0.2
 
     - provider: "ollama"
       model: "llama3"

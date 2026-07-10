@@ -1,9 +1,9 @@
 'use client';
 
 import type React from 'react';
-import { Bot, LayoutDashboard, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
+import { Bot, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
 
-type Tab = 'dashboard' | 'findings' | 'agents' | 'tools';
+type Tab = 'dashboard' | 'findings' | 'agents' | 'tools' | 'config';
 
 interface SidebarItemProps {
   active: boolean;
@@ -68,6 +68,7 @@ export function Sidebar({
         <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings"  count={findingCount}  onClick={() => onTabChange('findings')} />
         <SidebarItem active={activeTab === 'agents'}    icon={Bot}             label="Agents"    count={agentCount}    onClick={() => onTabChange('agents')} />
         <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Tools"     count={toolCount}     onClick={() => onTabChange('tools')} />
+        <SidebarItem active={activeTab === 'config'}    icon={Settings}        label="Settings"                        onClick={() => onTabChange('config')} />
       </nav>
 
       {/* Footer — connection status */}

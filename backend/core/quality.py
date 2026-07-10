@@ -31,6 +31,11 @@ TOOL_EVIDENCE_TAGS = {
     "wpscan",
 }
 
+NON_VULNERABILITY_TAGS = {
+    "technology",
+    "fingerprint",
+}
+
 
 def evidence_grade(score: float) -> str:
     if score >= 85:
@@ -57,9 +62,17 @@ def assess_finding_quality(finding: dict[str, Any]) -> dict[str, Any]:
     cves = finding.get("cve_ids") or []
     cwes = finding.get("cwe_ids") or []
     nvd_verified = bool(finding.get("nvd_verified")) or "nvd-verified" in tags
+    title_lower = str(finding.get("title") or "").lower()
 
     score = 12.0
     notes: list[str] = []
+
+    is_inventory_only = (
+        "technology" in tags
+        or title_lower.startswith("technology detected")
+        or ("recon" in tags and "summary" in tags)
+        or title_lower.startswith("reconnaissance completed")
+    )
 
     if status == "confirmed":
         score += 24
@@ -108,6 +121,10 @@ def assess_finding_quality(finding: dict[str, Any]) -> dict[str, Any]:
     if len(description) < 40:
         score -= 4
         notes.append("Description is too short for audit-grade reporting.")
+
+    if is_inventory_only and not (request or response or cves or nvd_verified):
+        score = min(score, 15.0)
+        notes.append("Inventory/fingerprint context only; not a vulnerability finding.")
 
     score = max(0.0, min(100.0, round(score, 1)))
     grade = evidence_grade(score)

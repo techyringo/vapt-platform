@@ -173,6 +173,31 @@ def classify_target(raw_target: str) -> TargetClassification:
     host_candidate, port = _strip_single_host_port(raw.strip().strip("/"))
     host_candidate = host_candidate.lower().strip("[]")
 
+    if host_candidate.startswith("*."):
+        base_host = host_candidate[2:].rstrip(".")
+        if _looks_like_domain(base_host):
+            cloud_tokens, provider = _cloud_tokens(base_host)
+            tokens = {"target_domain", "subdomain", "wildcard_scope"}
+            tokens.update(cloud_tokens)
+            tokens.update(_api_tokens(base_host, ""))
+            tokens.update(_tech_hint_tokens(base_host))
+            return TargetClassification(
+                raw=raw,
+                normalized=f"*.{base_host}",
+                target_type="domain_wildcard",
+                host=base_host,
+                port=port,
+                scope_domain=f"*.{base_host}",
+                asset_type="domain",
+                provider=provider,
+                evidence_tokens=tokens,
+                metadata={
+                    "seed_port": port,
+                    "wildcard_scope": True,
+                    "execution_seed": base_host,
+                } if port else {"wildcard_scope": True, "execution_seed": base_host},
+            )
+
     try:
         network = ipaddress.ip_network(host_candidate, strict=False)
         tokens = {"ip_address", "target_ip"}

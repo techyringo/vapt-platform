@@ -97,24 +97,30 @@ class ReconAgent(BaseAgent):
                 logger.warning("[RECON] Subdomain enumeration error: {err}", err=result)
                 continue
             for candidate in result:
-                if self._is_host_in_scope(str(candidate)):
-                    all_subdomains.add(str(candidate).strip().lower().rstrip("."))
+                candidate_host = str(candidate).strip().lower().rstrip(".")
+                if self._is_host_discoverable(candidate_host):
+                    all_subdomains.add(candidate_host)
 
         logger.info("[RECON] Found {count} unique subdomains", count=len(all_subdomains))
 
-        # Add discovered subdomains to scope
-        for sub in all_subdomains:
+        active_subdomains = {
+            sub for sub in all_subdomains if self._is_host_in_scope(sub)
+        }
+        passive_only_subdomains = all_subdomains - active_subdomains
+
+        # Add only actively authorised discovered subdomains to scope.
+        for sub in active_subdomains:
             self.scope.add_discovered_asset(sub)
 
         # Resolve discovered names before HTTP probing. This is important
         # attack-surface evidence in its own right and prevents "subdomain
         # found but never validated" blind spots.
-        dns_inputs = sorted(all_subdomains | ({domain} if not is_ip_target else set()))
+        dns_inputs = sorted(active_subdomains | ({domain} if not is_ip_target else set()))
         dns_records = await self._run_dns_resolution(dns_inputs)
 
         # Probe live hosts with httpx
         domains_to_probe = [
-            host for host in sorted(all_subdomains | {domain})
+            host for host in sorted(active_subdomains | {domain})
             if self._is_host_in_scope(host)
         ]
         probe_inputs = [target_url] if is_ip_target and target_url else domains_to_probe
@@ -174,13 +180,17 @@ class ReconAgent(BaseAgent):
 
         # Store results in task metadata
         task.result = {
-            "subdomains": sorted(sub for sub in all_subdomains if self._is_host_in_scope(sub)),
+            "subdomains": sorted(active_subdomains),
+            "discovered_subdomains": sorted(all_subdomains),
+            "passive_only_subdomains": sorted(passive_only_subdomains),
             "live_urls": [entry for entry in live_urls if self.is_in_scope(entry.get("url", ""))],
             "historical_urls": sorted(scoped_urls),
             "crawled_urls": sorted(scoped_crawled_urls),
             "technologies": technologies,
             "dns_records": dns_records,
             "total_subdomains": len(all_subdomains),
+            "total_active_subdomains": len(active_subdomains),
+            "total_passive_only_subdomains": len(passive_only_subdomains),
             "total_dns_records": len(dns_records),
             "total_live_urls": len(live_urls),
             "total_historical_urls": len(scoped_urls),
@@ -188,35 +198,13 @@ class ReconAgent(BaseAgent):
             "tool_runs": self.get_tool_runs(),
         }
 
-        # Check for technology-based findings
-        self._check_tech_findings(technologies, target)
-
-        # Always emit at least an informational finding that recon completed,
-        # so the scan never finishes with zero findings just because the
-        # target was a bare host with no subdomain/tech signals.
-        if not self.get_findings():
-            from core.models import Finding, Severity, AgentType, Target as _T
-            self._add_finding(Finding(
-                title=f"Reconnaissance Completed for {target.host}",
-                description=(
-                    f"Reconnaissance phase completed against {target.host}. "
-                    f"No specific technology-stack findings were emitted by the "
-                    f"automated checks, but the target was added to the live-URL "
-                    f"list for downstream vulnerability scanning. Subdomains found: "
-                    f"{len(all_subdomains)}; live URLs: {len(live_urls)}; "
-                    f"URLs in scope: {len(scoped_urls)}; crawled URLs: {len(scoped_crawled_urls)}."
-                ),
-                severity=Severity.INFORMATIONAL,
-                agent_source=AgentType.RECON,
-                target=target,
-                evidence=f"subdomains={len(all_subdomains)} live_urls={len(live_urls)} "
-                         f"urls={len(scoped_urls)} crawled_urls={len(scoped_crawled_urls)} "
-                         f"technologies={list(technologies.keys())}",
-                remediation="No remediation required — this is an informational recon summary.",
-                tags=["recon", "summary"],
-                confidence="high",
-                status="confirmed",
-            ))
+        logger.info(
+            "[RECON] Recon context captured: {tech_hosts} technology host(s), {live} live URL(s), "
+            "{urls} historical URL(s). Technology fingerprints are scan context, not findings.",
+            tech_hosts=len(technologies),
+            live=len(live_urls),
+            urls=len(scoped_urls),
+        )
 
         logger.info(
             "[RECON] Complete: {subs} subdomains, {live} live, {urls} URLs, {crawled} crawled, {tech} tech stacks",
@@ -240,6 +228,15 @@ class ReconAgent(BaseAgent):
         if not host:
             return False
         return self.is_in_scope(f"https://{host}") or self.is_in_scope(f"http://{host}")
+
+    def _is_host_discoverable(self, host: str) -> bool:
+        host = str(host or "").strip().lower().rstrip(".")
+        if not host:
+            return False
+        checker = getattr(self.scope, "is_discoverable_host", None)
+        if callable(checker):
+            return bool(checker(host))
+        return self._is_host_in_scope(host)
 
     @staticmethod
     def _is_ip_address(host: str) -> bool:
@@ -550,87 +547,13 @@ class ReconAgent(BaseAgent):
     # ── Finding Generation ─────────────────────────────────────────
 
     def _check_tech_findings(self, technologies: dict[str, list[str]], target: Target) -> None:
-        """Generate findings based on discovered technologies.
+        """Deprecated: technology fingerprints are context, not findings.
 
-        Flags outdated or vulnerable technology stacks.
+        Keep this no-op as a compatibility hook for older callers. Version/CVE
+        intelligence belongs in the intel/vulnerability phases after evidence is
+        tied to a verified vulnerable version or concrete misconfiguration.
         """
-        version_pattern = re.compile(r'(\d+\.\d+(?:\.\d+)?)')
-
-        interesting_techs = {
-            "WordPress": {"cwe": "CWE-933", "severity": Severity.MEDIUM},
-            "Joomla": {"cwe": "CWE-933", "severity": Severity.MEDIUM},
-            "Drupal": {"cwe": "CWE-933", "severity": Severity.MEDIUM},
-            "PHP": {"cwe": "CWE-1104", "severity": Severity.LOW},
-            "Apache": {"cwe": "CWE-933", "severity": Severity.LOW},
-            "Nginx": {"cwe": "CWE-933", "severity": Severity.LOW},
-            "jQuery": {"cwe": "CWE-1104", "severity": Severity.LOW},
-            "React": {"cwe": "CWE-933", "severity": Severity.INFORMATIONAL},
-            "Angular": {"cwe": "CWE-933", "severity": Severity.INFORMATIONAL},
-            "Vue": {"cwe": "CWE-933", "severity": Severity.INFORMATIONAL},
-            "AWS S3": {"cwe": "CWE-319", "severity": Severity.HIGH},
-            "CloudFlare": {"cwe": "CWE-933", "severity": Severity.INFORMATIONAL},
-            "Shopify": {"cwe": "CWE-933", "severity": Severity.INFORMATIONAL},
-            "phpMyAdmin": {"cwe": "CWE-16", "severity": Severity.HIGH},
-        }
-
-        # Deduplicate: one finding per unique (matched_key, version) pair across
-        # ALL hosts.  Previously one finding per host × tech = 21 "Apache" findings
-        # for 21 subdomains, all collapsing to the same dedup key in ScanManager —
-        # wasting 20 NVD lookups and cluttering the log.
-        seen_tech_keys: set[tuple[str, str]] = set()
-
-        for host, techs in technologies.items():
-            for tech in techs:
-                matched = None
-                for key in interesting_techs:
-                    if key.lower() in tech.lower():
-                        matched = key
-                        break
-
-                if not matched:
-                    continue
-
-                # Normalise version string for dedup — "Apache/2.4.52" and
-                # "Apache/2.4.41" are distinct findings; bare "Apache" is a catch-all.
-                version_match = version_pattern.search(tech)
-                version_str = version_match.group(1) if version_match else ""
-                dedup_key = (matched.lower(), version_str)
-                if dedup_key in seen_tech_keys:
-                    continue
-                seen_tech_keys.add(dedup_key)
-
-                info = interesting_techs[matched]
-                # Collect all hosts that have this tech for a richer description.
-                all_hosts_with_tech = [
-                    h for h, ts in technologies.items()
-                    if any(matched.lower() in t.lower() for t in ts)
-                ]
-                host_summary = ", ".join(sorted(all_hosts_with_tech)[:5])
-                if len(all_hosts_with_tech) > 5:
-                    host_summary += f" (+{len(all_hosts_with_tech) - 5} more)"
-
-                finding = Finding(
-                    title=f"Technology Detected: {tech}",
-                    description=(
-                        f"{matched} ({tech}) was detected on {len(all_hosts_with_tech)} host(s): "
-                        f"{host_summary}. This technology may have known vulnerabilities depending "
-                        f"on the exact version. Vulnerability scanning should include {matched}-specific checks."
-                    ),
-                    severity=info["severity"],
-                    cvss_score=None,
-                    agent_source=AgentType.RECON,
-                    target=Target(host=target.host, url=f"https://{target.host}"),
-                    evidence=f"Technology: {tech} detected on hosts: {host_summary}",
-                    remediation=(
-                        f"Ensure {matched} is updated to the latest stable version. "
-                        f"Review security best practices for {matched} deployments."
-                    ),
-                    cwe_ids=[info["cwe"]],
-                    tags=["technology", "recon", matched.lower().replace(" ", "_")],
-                    confidence="high",
-                    status="confirmed",
-                )
-                self._add_finding(finding)
+        return
 
     async def _direct_http_probe(self, hosts: list[str], technologies: dict) -> list[dict]:
         """Pure Python fallback: probe hosts directly with httpx when CLI tools are unavailable."""

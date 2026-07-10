@@ -1,6 +1,6 @@
 'use client';
 
-import { Moon, Palette, RefreshCw, Shield, Sun, Wifi, WifiOff, X } from 'lucide-react';
+import { Command, Moon, Palette, RefreshCw, Shield, Sun, Wifi, WifiOff, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { COLOR_GRADES, useTheme, type ColorGrade } from '@/context/ThemeContext';
 
@@ -104,9 +104,10 @@ interface HeaderProps {
   targetCount: number;
   refreshing: boolean;
   onRefresh: () => void;
+  onOpenCommand?: () => void;
 }
 
-export function Header({ apiHealthy, connected, targetCount, refreshing, onRefresh }: HeaderProps) {
+export function Header({ apiHealthy, connected, targetCount, refreshing, onRefresh, onOpenCommand }: HeaderProps) {
   const { theme, toggleTheme } = useTheme();
 
   return (
@@ -128,6 +129,20 @@ export function Header({ apiHealthy, connected, targetCount, refreshing, onRefre
 
       {/* Controls right */}
       <div className="header-controls">
+        {/* Command palette trigger */}
+        {onOpenCommand && (
+          <button
+            onClick={onOpenCommand}
+            className="cmdk-trigger always-show"
+            title="Command palette"
+            aria-label="Open command palette"
+          >
+            <Command size={12} aria-hidden="true" />
+            <span className="cmdk-trigger-label">Quick actions</span>
+            <span className="kbd">⌘K</span>
+          </button>
+        )}
+
         {/* Status pills */}
         {targetCount > 0 && (
           <span className="status-pill cyan always-show" style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 10 }}>

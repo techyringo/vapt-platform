@@ -830,7 +830,8 @@ class ScanManager:
                     "consumes": tool.consumes,
                     "produces": tool.produces,
                     "aggressive": tool.aggressive,
-                    "requires_api_keys": tool.requires_api_keys,
+                    "requires_credentials": bool(tool.requires_api_keys),
+                    "required_credentials_count": len(tool.requires_api_keys),
                     "notes": tool.notes,
                 }
                 for tool in tools
@@ -989,21 +990,73 @@ class ScanManager:
         classifications = classify_targets(targets)
         authorized_domains, authorized_ips = scope_from_classifications(classifications)
         seed_evidence = evidence_from_classifications(classifications)
+        execution_targets = [
+            item.metadata.get("execution_seed") or item.normalized or item.raw
+            for item in classifications
+        ] or targets
 
         # Merge caller-supplied session/auth presets (P1 authenticated scans)
         # into the scope so crawlers and safe modules reach protected surfaces.
         overrides = scope_config or {}
+        def _as_list(value: Any) -> list[str]:
+            if value is None:
+                return []
+            if isinstance(value, str):
+                return [item.strip() for item in re.split(r"[\n,]+", value) if item.strip()]
+            if isinstance(value, list):
+                return [str(item).strip() for item in value if str(item).strip()]
+            return []
+
+        for domain in _as_list(overrides.get("authorized_domains")):
+            if domain not in authorized_domains:
+                authorized_domains.append(domain)
+        for ip_entry in _as_list(overrides.get("authorized_ips")):
+            if ip_entry not in authorized_ips:
+                authorized_ips.append(ip_entry)
+
         auth_type = overrides.get("auth_type") if overrides.get("auth_type") in {"bearer", "basic", "cookie"} else None
         scope_cfg = ScopeConfig(
             authorized_domains=authorized_domains,
             authorized_ips=authorized_ips,
+            out_of_scope=_as_list(overrides.get("out_of_scope")),
+            max_depth=int(overrides.get("max_depth") or ScopeConfig().max_depth),
+            max_pages=int(overrides.get("max_pages") or ScopeConfig().max_pages),
+            max_requests_total=int(overrides.get("max_requests_total") or ScopeConfig().max_requests_total),
+            exclude_paths=_as_list(overrides.get("exclude_paths")),
+            include_paths=_as_list(overrides.get("include_paths")) or None,
             rate_limit=self._config.rate_limiting.requests_per_second,
             auth_token=overrides.get("auth_token") or None,
             auth_type=auth_type or ("bearer" if overrides.get("auth_token") else None),
             custom_headers=overrides.get("custom_headers") or {},
             cookies=overrides.get("cookies") or {},
         )
+        if overrides.get("rate_limit"):
+            scope_cfg.rate_limit = int(overrides["rate_limit"])
         scope = ScopeManager(scope_cfg)
+        scope_summary = scope.get_scope_summary()
+        scope_summary["execution_targets"] = execution_targets
+        scope_summary["scope_semantics"] = {
+            "exact_domain": "active testing is limited to the exact host",
+            "wildcard_domain": "*.example.com authorises active testing of discovered subdomains",
+            "passive_discovery": "child domains may be reported as inventory without being probed",
+            "out_of_scope": "out-of-scope entries override all authorisation",
+        }
+        rules_of_engagement = {
+            "authorized_domains": scope_cfg.authorized_domains,
+            "authorized_ips": scope_cfg.authorized_ips,
+            "out_of_scope": scope_cfg.out_of_scope,
+            "rate_limit": scope_cfg.rate_limit,
+            "max_depth": scope_cfg.max_depth,
+            "max_pages": scope_cfg.max_pages,
+            "max_requests_total": scope_cfg.max_requests_total,
+            "exclude_paths": scope_cfg.exclude_paths,
+            "include_paths": scope_cfg.include_paths or [],
+            "emergency_stop": f"/api/scans/{scan_id}/stop",
+        }
+        artifact_payload = json.dumps(rules_of_engagement, sort_keys=True, default=str)
+        rules_of_engagement["artifact_sha256"] = hashlib.sha256(
+            artifact_payload.encode("utf-8")
+        ).hexdigest()
 
         # Create orchestrator. The orchestrator locates config.yaml next to
         # the backend package, so no hardcoded path is needed.
@@ -1031,22 +1084,25 @@ class ScanManager:
                 orchestrator.register_agent(atype, factory())
 
         # Initialize scan tracking
-            self._scans[scan_id] = {
-                "id": scan_id,
-                "name": display_name,
-                "mode": mode,
+        self._scans[scan_id] = {
+            "id": scan_id,
+            "name": display_name,
+            "mode": mode,
             "status": "running",
             "current_phase": "init",
             "targets": targets,
+            "execution_targets": execution_targets,
             "display_targets": [display_target(target) for target in targets],
             "start_time": datetime.utcnow().isoformat(),
             "duration": 0,
-                "profile_agents": profile.agents,
-                "exploit_enabled": profile.exploit,
-                "target_classifications": [item.to_dict() for item in classifications],
-                "seed_evidence": sorted(seed_evidence),
-                "coverage": self._initial_coverage_contract(targets, profile.agents),
-            }
+            "profile_agents": profile.agents,
+            "exploit_enabled": profile.exploit,
+            "target_classifications": [item.to_dict() for item in classifications],
+            "scope": scope_summary,
+            "rules_of_engagement": rules_of_engagement,
+            "seed_evidence": sorted(seed_evidence),
+            "coverage": self._initial_coverage_contract(targets, profile.agents),
+        }
         self._findings[scan_id] = []
         self._store.upsert_scan(scan_id, self._scans[scan_id])
         self._ingest_initial_targets(scan_id, targets, classifications)
@@ -1171,7 +1227,7 @@ class ScanManager:
         async def run_background():
             try:
                 result = await orchestrator.start_scan(
-                    targets=targets,
+                    targets=execution_targets,
                     mode=scan_mode,
                     scan_name=display_name,
                     scope_config=scope_cfg,

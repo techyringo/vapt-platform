@@ -18,10 +18,10 @@ export async function fetchAPI<T>(path: string, options?: RequestInit): Promise<
 
 export const api = {
   // Scans
-  startScan: (targets: string[], mode: string, name: string) =>
+  startScan: (targets: string[], mode: string, name: string, scopeConfig?: Record<string, unknown>) =>
     fetchAPI<{ scan_id: string; status: string }>('/api/scans/start', {
       method: 'POST',
-      body: JSON.stringify({ targets, mode, name }),
+      body: JSON.stringify({ targets, mode, name, scope_config: scopeConfig || undefined }),
     }),
 
   listScans: () =>
@@ -93,4 +93,20 @@ export const api = {
 
   downloadLog: (name: string) =>
     apiUrl(`/api/system/logs/${encodeURIComponent(name)}/download`),
+
+  // LLM configuration (runtime, frontend-configurable — no hardcoded model)
+  getLLMConfig: () =>
+    fetchAPI<{ llm: import('@/types').LLMConfig }>('/api/config/llm'),
+
+  saveLLMConfig: (cfg: import('@/types').LLMConfigInput) =>
+    fetchAPI<{ llm: import('@/types').LLMConfig; probe: import('@/types').LLMProbe }>('/api/config/llm', {
+      method: 'PUT',
+      body: JSON.stringify(cfg),
+    }),
+
+  testLLM: (cfg: import('@/types').LLMTestInput) =>
+    fetchAPI<{ probe: import('@/types').LLMProbe }>('/api/config/llm/test', {
+      method: 'POST',
+      body: JSON.stringify(cfg),
+    }),
 };

@@ -128,10 +128,16 @@ class LLMConfig(BaseModel):
     temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int = Field(default=4096, ge=1, description="Max tokens per completion")
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Env var for API key")
+    api_key: str = Field(default="", description="Inline API key (runtime-set; preferred over api_key_env when set). Stored locally, never returned by the API.")
     base_url: str = Field(default="", description="Base URL for local/OpenAI-compatible providers")
+    verify_ssl: bool = Field(default=True, description="Verify TLS for the primary provider (False for self-signed /chat endpoints).")
     analysis_model: str = Field(default="gpt-4o", description="Model for analysis")
     report_model: str = Field(default="gpt-4o", description="Model for report writing")
     fallback_providers: list[dict[str, Any]] = Field(default_factory=list, description="Fallback LLM providers")
+    # Runtime toggles (frontend-configurable). None = defer to the VAPT_LLM_ENABLED /
+    # VAPT_LLM_ALLOW_FALLBACKS env vars, preserving backwards compatibility.
+    enabled: Optional[bool] = Field(default=None, description="Enable LLM. None → use VAPT_LLM_ENABLED env.")
+    allow_fallbacks: Optional[bool] = Field(default=None, description="Allow fallback chain. None → use VAPT_LLM_ALLOW_FALLBACKS env.")
 
 
 class DatabaseConfig(BaseModel):
