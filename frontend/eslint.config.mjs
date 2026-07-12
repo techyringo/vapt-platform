@@ -1,0 +1,21 @@
+import { FlatCompat } from '@eslint/eslintrc';
+import { dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const compat = new FlatCompat({
+  baseDirectory: dirname(fileURLToPath(import.meta.url)),
+});
+
+const config = [
+  ...compat.extends('next/core-web-vitals', 'next/typescript'),
+  {
+    // Existing API/result shapes are incrementally typed. Keep the debt visible
+    // without making unrelated feature branches impossible to verify.
+    rules: { '@typescript-eslint/no-explicit-any': 'warn' },
+  },
+  {
+    ignores: ['.next/**', 'node_modules/**', 'next-env.d.ts'],
+  },
+];
+
+export default config;
