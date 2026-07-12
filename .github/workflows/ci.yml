@@ -23,7 +23,7 @@ jobs:
           cache-dependency-path: backend/requirements.txt
       - run: pip install -r requirements.txt
       - run: python -m compileall -q .
-      - run: pytest -q
+      - run: PYTHONPATH=. pytest -q
 
   frontend:
     runs-on: ubuntu-latest
