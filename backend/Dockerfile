@@ -1,7 +1,12 @@
-FROM golang:1.25-bookworm AS go-tools
+FROM golang:1.26-bookworm AS go-tools
 
 ENV GOBIN=/out
-RUN mkdir -p /out && \
+# Some enterprise/VM networks publish AAAA records but have no working IPv6
+# route. Use libc address ordering and prefer IPv4-mapped addresses so module
+# downloads do not fail while IPv4 is healthy.
+ENV GODEBUG=netdns=cgo
+RUN printf 'precedence ::ffff:0:0/96  100\n' >> /etc/gai.conf && \
+    mkdir -p /out && \
     go install github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest && \
     go install github.com/projectdiscovery/httpx/cmd/httpx@latest && \
     go install github.com/projectdiscovery/nuclei/v3/cmd/nuclei@latest && \
