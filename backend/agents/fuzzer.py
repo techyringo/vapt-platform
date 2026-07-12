@@ -373,7 +373,7 @@ class FuzzingAgent(BaseAgent):
                 'info-disclosure|debug-access|api-flaw|other"}]}'
             )
 
-            result = await self._llm_client.analyze(prompt, provider=available[0], task="triage")
+            result = await self._llm_client.analyze(prompt, task="triage")
             if result and "insights" in result:
                 severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
                 for insight in result["insights"][:8]:

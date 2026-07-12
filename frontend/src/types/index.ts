@@ -224,6 +224,7 @@ export interface LLMConfig {
   has_api_key: boolean;
   analysis_model: string;
   report_model: string;
+  review_model: string;
   temperature: number;
   max_tokens: number;
   fallback_providers: LLMFallbackProvider[];
@@ -240,6 +241,7 @@ export interface LLMConfigInput {
   api_key_env: string;
   analysis_model: string;
   report_model: string;
+  review_model: string;
   temperature: number;
   max_tokens: number;
   fallback_providers: LLMFallbackProvider[];

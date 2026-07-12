@@ -27,6 +27,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -44,7 +45,7 @@ from core.llm_budget import budget_prompt
 _TRIAGE_TASKS = {"triage", "classify", "classification", "dedup", "categorize", "fast"}
 _REASON_TASKS = {
     "reason", "reasoning", "remediation", "report", "summary", "exec_summary",
-    "cve", "cwe", "analysis", "dual_review",
+    "cve", "cwe", "analysis",
 }
 
 
@@ -152,6 +153,7 @@ class LLMClient:
         # reasoning/reporting. Populated from config (analysis_model/report_model).
         self._analysis_model: str = ""
         self._report_model: str = ""
+        self._review_model: str = ""
 
         if config:
             self._load_from_config(config)
@@ -209,6 +211,7 @@ class LLMClient:
         # Task routing models (default to the primary model when unset).
         self._analysis_model = getattr(llm, "analysis_model", "") or llm.model
         self._report_model = getattr(llm, "report_model", "") or llm.model
+        self._review_model = getattr(llm, "review_model", "") or self._analysis_model
 
         # Primary provider. Registered under "<provider>:<model>" so that the
         # fallback chain can hold several models from the same provider.
@@ -270,6 +273,7 @@ class LLMClient:
         """Load sensible defaults when no config provided."""
         self._analysis_model = "gpt-4o"
         self._report_model = "gpt-4o"
+        self._review_model = "gpt-4o"
         self._providers["openai"] = ProviderConfig(
             provider=LLMProvider.OPENAI,
             model="gpt-4o",
@@ -347,22 +351,20 @@ class LLMClient:
                 available.append(name)
         return available
 
-    def _route_model(self, task: str, prov_name: str, pc: "ProviderConfig") -> str:
-        """Pick the model for a task. Routing applies only to the PRIMARY
-        provider (where analysis_model/report_model are meaningful); fallback
-        providers keep their own configured model so a routed local model name
-        is never sent to a cloud provider that lacks it."""
-        default_model = pc.model
-        if not task or not self._fallback_chain:
-            return default_model
-        if prov_name != self._fallback_chain[0]:
-            return default_model
+    def _role_model(self, task: str) -> str:
+        """Return the operator-selected model for a task role."""
         t = task.lower().strip()
+        if t == "dual_review":
+            return self._review_model
         if t in _TRIAGE_TASKS and self._analysis_model:
             return self._analysis_model
         if t in _REASON_TASKS and self._report_model:
             return self._report_model
-        return default_model
+        return ""
+
+    def _provider_for_model(self, model: str) -> Optional[str]:
+        """Resolve a role model to the endpoint that actually serves it."""
+        return next((key for key in self._fallback_chain if self._providers[key].model == model), None)
 
     async def complete(
         self,
@@ -399,8 +401,13 @@ class LLMClient:
                 error="LLM disabled. Set VAPT_LLM_ENABLED=true to enable AI enrichment.",
             )
 
-        # Check cache
-        cache_key = f"{provider}:{model}:{prompt[:500]}"
+        role_model = model or self._role_model(task)
+        cache_material = json.dumps({
+            "provider": provider, "model": role_model, "task": task,
+            "system": system_prompt, "prompt": prompt, "temperature": temperature,
+            "max_tokens": max_tokens, "json_mode": json_mode,
+        }, sort_keys=True)
+        cache_key = hashlib.sha256(cache_material.encode("utf-8")).hexdigest()
         if cache_key in self._cache:
             cached = self._cache[cache_key]
             cached.cached = True
@@ -410,11 +417,18 @@ class LLMClient:
         if provider:
             providers_to_try = [self._resolve_provider_key(provider) or provider]
         else:
-            providers_to_try = (
+            base_chain = list(
                 self._fallback_chain
                 if use_fallback and self._allow_fallbacks
                 else self._fallback_chain[:1]
             )
+            role_provider = self._provider_for_model(role_model) if role_model else None
+            if role_provider:
+                providers_to_try = [role_provider]
+                if use_fallback and self._allow_fallbacks:
+                    providers_to_try.extend(p for p in base_chain if p != role_provider)
+            else:
+                providers_to_try = base_chain
 
         last_error = None
         for prov_name in providers_to_try:
@@ -434,7 +448,9 @@ class LLMClient:
                     continue
 
             # Resolve model (explicit override > task routing > provider default)
-            effective_model = model or self._route_model(task, prov_name, pc)
+            # A role model is used only on the endpoint configured to serve it.
+            # During failover each endpoint receives its own known-good model.
+            effective_model = role_model if role_model and pc.model == role_model else pc.model
             effective_temp = temperature if temperature is not None else pc.temperature
             effective_max = max_tokens or pc.max_tokens
 

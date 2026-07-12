@@ -143,7 +143,7 @@ class ReportAgent(BaseAgent):
 
         # Use the smaller/faster model as the independent reviewer when a distinct
         # one is configured (e.g. gemma reviews qwen); else the primary model.
-        reviewer = getattr(llm, "_analysis_model", "") or ""
+        reviewer = getattr(llm, "_review_model", "") or ""
         try:
             await dual_review(scan_result.findings, llm, reviewer_model=reviewer)
         except Exception as exc:

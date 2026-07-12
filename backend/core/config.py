@@ -120,6 +120,7 @@ class LLMConfig(BaseModel):
         base_url:          Base URL for local/OpenAI-compatible providers.
         analysis_model:    Model used for vulnerability analysis.
         report_model:      Model used for report generation.
+        review_model:      Independent model used to challenge findings/reports.
         fallback_providers: List of backup providers tried in order on failure.
     """
 
@@ -133,6 +134,7 @@ class LLMConfig(BaseModel):
     verify_ssl: bool = Field(default=True, description="Verify TLS for the primary provider (False for self-signed /chat endpoints).")
     analysis_model: str = Field(default="gpt-4o", description="Model for analysis")
     report_model: str = Field(default="gpt-4o", description="Model for report writing")
+    review_model: str = Field(default="gpt-4o", description="Model for independent evidence review")
     fallback_providers: list[dict[str, Any]] = Field(default_factory=list, description="Fallback LLM providers")
     # Runtime toggles (frontend-configurable). None = defer to the VAPT_LLM_ENABLED /
     # VAPT_LLM_ALLOW_FALLBACKS env vars, preserving backwards compatibility.
