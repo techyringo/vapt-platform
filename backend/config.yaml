@@ -438,6 +438,9 @@ llm:
   #   base_url: "http://host.docker.internal:11434"
   analysis_model: "gpt-4o"
   report_model: "gpt-4o"
+  # Independent evidence reviewer; configure this to a model served by a
+  # different endpoint for meaningful dual-model validation.
+  review_model: "gpt-4o"
 
   # Fallback providers — tried in order if primary fails
   fallback_providers:

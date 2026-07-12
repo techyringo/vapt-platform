@@ -251,7 +251,7 @@ class CVEResolver:
         )
 
         try:
-            result = await self._llm.analyze(prompt, provider=available[0])
+            result = await self._llm.analyze(prompt, task="cve")
         except Exception as exc:
             logger.debug("[CVERESOLVER] LLM proposal failed: {err}", err=exc)
             return []

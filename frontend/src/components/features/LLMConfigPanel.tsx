@@ -31,6 +31,7 @@ export function LLMConfigPanel() {
   const [endpoints, setEndpoints] = useState<Endpoint[]>([emptyEndpoint()]);
   const [analysisModel, setAnalysisModel] = useState('');
   const [reportModel, setReportModel] = useState('');
+  const [reviewModel, setReviewModel] = useState('');
   const [temperature, setTemperature] = useState(0.3);
   const [maxTokens, setMaxTokens] = useState(4096);
   const [enabled, setEnabled] = useState(true);
@@ -66,6 +67,7 @@ export function LLMConfigPanel() {
       setEndpoints([primary, ...rest]);
       setAnalysisModel(c.analysis_model || c.model);
       setReportModel(c.report_model || c.model);
+      setReviewModel(c.review_model || c.analysis_model || c.model);
       setTemperature(c.temperature ?? 0.3);
       setMaxTokens(c.max_tokens ?? 4096);
       setEnabled(c.enabled ?? true);
@@ -145,6 +147,7 @@ export function LLMConfigPanel() {
         api_key_env: primary.api_key_env,
         analysis_model: analysisModel || primary.model,
         report_model: reportModel || primary.model,
+        review_model: reviewModel || analysisModel || primary.model,
         temperature,
         max_tokens: maxTokens,
         fallback_providers: endpoints.slice(1).map(ep => ({
@@ -258,11 +261,13 @@ export function LLMConfigPanel() {
               </div>
 
               {isPrimary && (
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginTop: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
                   <input className="field" style={{ height: 34 }} value={analysisModel}
                     onChange={e => setAnalysisModel(e.target.value)} placeholder="analysis model (triage)" />
                   <input className="field" style={{ height: 34 }} value={reportModel}
                     onChange={e => setReportModel(e.target.value)} placeholder="report model (reasoning)" />
+                  <input className="field" style={{ height: 34 }} value={reviewModel}
+                    onChange={e => setReviewModel(e.target.value)} placeholder="review model (independent)" />
                 </div>
               )}
 

@@ -32,6 +32,7 @@ frontend/build/
 # Logs
 *.log
 *.txt
+!backend/requirements.txt
 logs/
 log_*.txt
 loop_logs.txt

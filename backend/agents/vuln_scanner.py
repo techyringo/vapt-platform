@@ -1394,7 +1394,7 @@ class VulnScannerAgent(BaseAgent):
                 "Only report findings you are confident about. Quality over quantity."
             )
 
-            result = await self._llm_client.analyze(prompt, provider=available[0])
+            result = await self._llm_client.analyze(prompt, task="analysis")
             if result and "findings" in result:
                 severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
                 for f in result["findings"][:10]:

@@ -109,6 +109,7 @@ class LLMConfigRequest(BaseModel):
     api_key_env: str = ""
     analysis_model: str = ""
     report_model: str = ""
+    review_model: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
     fallback_providers: list[dict[str, Any]] = []
@@ -456,6 +457,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "has_api_key": bool(getattr(llm, "api_key", "") or os.environ.get(llm.api_key_env, "")),
             "analysis_model": llm.analysis_model or llm.model,
             "report_model": llm.report_model or llm.model,
+            "review_model": getattr(llm, "review_model", "") or llm.analysis_model or llm.model,
             "temperature": llm.temperature,
             "max_tokens": llm.max_tokens,
             "fallback_providers": [
@@ -628,6 +630,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "api_key": api_key,
             "analysis_model": req.analysis_model or req.model,
             "report_model": req.report_model or req.model,
+            "review_model": req.review_model or req.analysis_model or req.model,
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
             "fallback_providers": merged_fb,
