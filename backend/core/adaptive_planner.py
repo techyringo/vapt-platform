@@ -7,6 +7,8 @@ executable tool, command, image, or out-of-scope target.
 
 from __future__ import annotations
 
+import asyncio
+import os
 from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
@@ -68,17 +70,20 @@ class AdaptivePlanner:
                     self._llm = LLMClient(self.config)
                 if self._llm.get_available_providers():
                     prompt = self._prompt(phase, evidence_tokens, candidates)
-                    response = await self._llm.complete(
-                        prompt,
-                        system_prompt=(
-                            "You are a security assessment planner. Rank only the supplied approved tools. "
-                            "Never invent commands, tools, exploits, targets, CVEs, or findings. "
-                            "Unknown needs must be returned as coverage gaps, not executable actions."
+                    response = await asyncio.wait_for(
+                        self._llm.complete(
+                            prompt,
+                            system_prompt=(
+                                "You are a security assessment planner. Rank only the supplied approved tools. "
+                                "Never invent commands, tools, exploits, targets, CVEs, or findings. "
+                                "Unknown needs must be returned as coverage gaps, not executable actions."
+                            ),
+                            task="reason",
+                            json_mode=True,
+                            max_tokens=700,
+                            use_fallback=False,
                         ),
-                        task="reason",
-                        json_mode=True,
-                        max_tokens=700,
-                        use_fallback=False,
+                        timeout=max(5, int(os.environ.get("VAPT_ADAPTIVE_LLM_TIMEOUT", "30"))),
                     )
                     model_trace = {
                         "used": bool(response.content and not response.error),
@@ -112,13 +117,20 @@ class AdaptivePlanner:
             "scan_id": scan_id,
             "phase": phase,
             "decision_type": "adaptive_capability_plan",
-            "status": "proposed",
+            "status": "recommended",
             "created_at": datetime.now(timezone.utc).isoformat(),
             "policy": {
                 "candidate_source": "deterministic_registry",
                 "aggressive_tools_allowed": False,
                 "arbitrary_commands_allowed": False,
                 "automatic_install_allowed": False,
+                "decision_authority": "deterministic_engagement_policy",
+                "model_role": "rank_eligible_candidates_only",
+            },
+            "execution": {
+                "mode": "advisory",
+                "automatically_executed": False,
+                "note": "The current fixed phase orchestrator does not execute this recommendation yet.",
             },
             "input_evidence": sorted(evidence_tokens),
             "target_layers": sorted(layers),

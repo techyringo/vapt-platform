@@ -1,5 +1,5 @@
 from core.appsec import merge_secret_findings, parse_gitleaks, parse_semgrep, parse_trivy, parse_trufflehog
-from services.appsec_assessment import validate_ref, validate_repository_url
+from services.appsec_assessment import repository_inventory, semgrep_rulepacks, validate_ref, validate_repository_url
 from database.store import PersistenceStore
 
 
@@ -27,6 +27,26 @@ def test_semgrep_parser_preserves_location_and_weakness() -> None:
     assert finding["path"] == "app.py"
     assert finding["start_line"] == 12
     assert finding["cwe_ids"] == ["CWE-95"]
+
+
+def test_semgrep_parser_preserves_sanitized_dataflow_locations() -> None:
+    payload = {"results": [{
+        "check_id": "python.sql-injection",
+        "path": "app.py",
+        "start": {"line": 20},
+        "extra": {
+            "message": "SQL injection data flow",
+            "severity": "ERROR",
+            "dataflow_trace": {
+                "taint_source": ["request.args", {"path": "app.py", "start": {"line": 5}}],
+                "taint_sink": ["cursor.execute", {"path": "db.py", "start": {"line": 42}}],
+            },
+        },
+    }]}
+    finding = parse_semgrep(payload, REPO)[0]
+    assert "app.py:5" in finding["evidence"]
+    assert "db.py:42" in finding["evidence"]
+    assert "request.args" not in finding["evidence"]
 
 
 def test_trivy_parser_emits_real_cve_and_fix() -> None:
@@ -110,6 +130,21 @@ def test_ref_validation_rejects_revision_traversal() -> None:
             pass
         else:
             raise AssertionError(f"Expected ref to be rejected: {value}")
+
+
+def test_repository_inventory_reports_languages_and_manifests(tmp_path) -> None:
+    (tmp_path / "api.py").write_text("print('ok')")
+    (tmp_path / "ui.tsx").write_text("export default 1")
+    (tmp_path / "package-lock.json").write_text("{}")
+    inventory = repository_inventory(tmp_path)
+    assert inventory["languages"] == {"Python": 1, "TypeScript": 1}
+    assert inventory["manifests"] == ["package-lock.json"]
+    assert inventory["files"] == 3
+
+
+def test_semgrep_rulepacks_are_configurable_and_deduplicated(monkeypatch) -> None:
+    monkeypatch.setenv("VAPT_SEMGREP_RULESETS", "p/default,p/security-audit,p/default")
+    assert semgrep_rulepacks() == ["p/default", "p/security-audit"]
 
 
 def test_appsec_store_round_trip(tmp_path) -> None:

@@ -45,6 +45,7 @@ class VulnScannerAgent(BaseAgent):
         self._llm_client = None
         self._cve_resolver = None  # lazily built — see _get_cve_resolver
         self._warned_missing_nuclei_templates = False
+        self._llm_hypotheses: list[dict[str, Any]] = []
 
     def _get_cve_resolver(self):
         """Lazily build the LLM+NVD resolver so nuclei-derived CVEs are
@@ -70,6 +71,7 @@ class VulnScannerAgent(BaseAgent):
         logger.info("[VULN_SCAN] Starting vulnerability scan")
         self.clear_findings()
         self.clear_tool_runs()
+        self._llm_hypotheses = []
 
         recon_data = task.parameters.get("recon_data", task.result or {})
         enum_data = task.parameters.get("enum_data", {})
@@ -158,6 +160,7 @@ class VulnScannerAgent(BaseAgent):
             "tech_nuclei_findings": tech_nuclei_findings,
             "technologies": technologies,
             "tool_runs": self.get_tool_runs(),
+            "llm_hypotheses": self._llm_hypotheses,
             "total_vulnerabilities": len(self._findings),
         }
 
@@ -483,8 +486,8 @@ class VulnScannerAgent(BaseAgent):
         from tools.runner import shared_temp_path
         selected_targets = self._prioritize_nuclei_targets(targets)
         batch_size = int(os.environ.get("VAPT_NUCLEI_BATCH_SIZE", "8"))
-        batch_timeout = int(os.environ.get("VAPT_NUCLEI_BATCH_TIMEOUT", "180"))
-        total_budget = int(os.environ.get("VAPT_NUCLEI_TOTAL_BUDGET", "240"))
+        batch_timeout = int(os.environ.get("VAPT_NUCLEI_BATCH_TIMEOUT", "300"))
+        total_budget = int(os.environ.get("VAPT_NUCLEI_TOTAL_BUDGET", "600"))
         started = time.monotonic()
         all_parsed: list[dict] = []
 
@@ -536,7 +539,17 @@ class VulnScannerAgent(BaseAgent):
                         "-rate-limit", "35",
                         "-max-host-error", "20",
                     ] + template_args + extra_args + tag_args,
-                    timeout=max(5, min(int(remaining), batch_timeout, self._adaptive_timeout(len(batch), 90, 10, batch_timeout))),
+                    # A full-template Nuclei pass needs startup/template-load
+                    # time even for one host. The former 90+10/target formula
+                    # killed healthy single-target runs after 100 seconds.
+                    timeout=max(
+                        5,
+                        min(
+                            int(remaining),
+                            batch_timeout,
+                            max(240, self._adaptive_timeout(len(batch), 120, 20, batch_timeout)),
+                        ),
+                    ),
                 )
                 self._record_tool_run(result, "vuln_scanning")
                 if result.stdout.strip():
@@ -1370,9 +1383,11 @@ class VulnScannerAgent(BaseAgent):
                     logger.debug("[VULN_SCAN] Header check failed for {url}: {err}", url=url, err=exc)
 
     async def _run_llm_vuln_analysis(self, targets: list[str], technologies: dict, target: Target) -> None:
-        """Use LLM to identify context-aware vulnerabilities from response headers, tech stack, and patterns.
+        """Produce bounded verification hypotheses, never vulnerability findings.
 
-        This catches misconfigurations and logic flaws that template scanners miss.
+        A model cannot prove a vulnerability from a response snippet. Its
+        useful output is a ranked test lead that a deterministic validator or
+        analyst can execute later.
         """
         try:
             from tools.llm_client import LLMClient
@@ -1415,30 +1430,31 @@ class VulnScannerAgent(BaseAgent):
                 "3. Authentication/authorization weaknesses\n4. Session management issues\n"
                 "5. API design flaws\n6. CORS misconfigurations\n7. Cache control issues\n"
                 "8. Any business logic concerns\n\n"
-                'Respond in JSON:\n{"findings": [{"title": "...", "description": "...", '
-                '"severity": "critical|high|medium|low", "category": "misconfig|info-disclosure|auth|'
-                'session|api|cors|cache|logic", "evidence": "specific header/value/pattern", '
-                '"remediation": "..."}]}\n\n'
-                "Only report findings you are confident about. Quality over quantity."
+                'Respond in JSON:\n{"hypotheses": [{"title": "...", "category": "misconfig|'
+                'info-disclosure|auth|session|api|cors|cache|logic", "basis": "specific supplied '
+                'header/value/pattern", "confidence": "high|medium|low", "next_verification": '
+                '"one safe concrete check"}]}\n\n'
+                "These are test hypotheses, not findings. Do not claim exploitability or impact."
             )
 
             result = await self._llm_client.analyze(prompt, task="analysis")
-            if result and "findings" in result:
-                severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
-                for f in result["findings"][:10]:
-                    finding = Finding(
-                        title=f"[AI] {f.get('title', 'Unknown')}",
-                        description=f.get("description", ""),
-                        severity=severity_map.get(f.get("severity", "medium"), Severity.MEDIUM),
-                        agent_source=AgentType.VULN_SCANNER,
-                        target=target,
-                        evidence=f"AI Analysis - Category: {f.get('category', 'N/A')}\nEvidence: {f.get('evidence', 'N/A')}",
-                        remediation=f.get("remediation", "Manual review required."),
-                        tags=["llm", "ai-vuln", f.get("category", "other")],
-                        confidence=f.get("confidence", "medium"),
-                    )
-                    self._add_finding(finding)
-                logger.info("[VULN_SCAN] LLM analysis: {count} AI-identified findings", count=len(result["findings"]))
+            if result and isinstance(result.get("hypotheses"), list):
+                for item in result["hypotheses"][:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    self._llm_hypotheses.append({
+                        "title": str(item.get("title") or "Contextual security test")[:200],
+                        "category": str(item.get("category") or "other")[:80],
+                        "basis": str(item.get("basis") or "")[:1000],
+                        "confidence": str(item.get("confidence") or "low")[:20],
+                        "next_verification": str(item.get("next_verification") or "Manual evidence review required.")[:1000],
+                        "status": "hypothesis",
+                        "source": "llm",
+                    })
+                logger.info(
+                    "[VULN_SCAN] LLM produced {count} verification hypotheses (not findings)",
+                    count=len(self._llm_hypotheses),
+                )
 
         except Exception as exc:
             logger.debug("[VULN_SCAN] LLM analysis error: {err}", err=exc)

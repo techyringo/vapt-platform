@@ -29,6 +29,9 @@ async def test_wordpress_evidence_makes_wordpress_capability_eligible(monkeypatc
     selected = {item["tool"] for item in decision["selected"]}
     assert "wpscan" in selected
     assert decision["policy"]["arbitrary_commands_allowed"] is False
+    assert decision["policy"]["decision_authority"] == "deterministic_engagement_policy"
+    assert decision["execution"]["automatically_executed"] is False
+    assert decision["status"] == "recommended"
 
 
 @pytest.mark.asyncio

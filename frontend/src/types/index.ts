@@ -195,6 +195,8 @@ export interface AgentDecision {
   hypotheses: string[];
   coverage_gaps: string[];
   model_trace: { used: boolean; provider: string; model: string; error: string };
+  policy?: { decision_authority?: string; model_role?: string };
+  execution?: { mode: string; automatically_executed: boolean; note: string };
 }
 
 export interface AttackChain {
@@ -243,6 +245,10 @@ export interface AppSecCoverageLane {
   error?: string;
   verification?: 'active' | 'classification-only' | string;
   detectors?: Record<string, string>;
+  languages?: Record<string, number>;
+  manifests?: string[];
+  rulepacks?: string[];
+  files?: number;
 }
 
 export interface AppSecFinding {

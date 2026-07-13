@@ -13,6 +13,8 @@ opinion, grounded strictly in the finding's own evidence.
 
 from __future__ import annotations
 
+import json
+import os
 from typing import Any, Optional
 
 from loguru import logger
@@ -69,14 +71,93 @@ async def review_finding(
         return None
 
     parsed = resp.json_content() if resp else None
-    if not isinstance(parsed, dict) or "valid" not in parsed:
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("valid"), bool):
         return None
     return {
-        "valid": bool(parsed.get("valid")),
+        "valid": parsed["valid"],
         "confidence": str(parsed.get("confidence", "low")),
         "reasoning": str(parsed.get("reasoning", ""))[:400],
         "reviewer_model": getattr(resp, "model", reviewer_model) or reviewer_model,
     }
+
+
+async def review_findings_batch(
+    findings: list[Any],
+    llm_client: Any,
+    reviewer_model: str = "",
+) -> list[tuple[Any, dict[str, Any]]]:
+    """Review a bounded finding batch in one model request.
+
+    NVIDIA and other hosted endpoints often have both RPM and high-latency
+    constraints. A separate call per finding wastes that budget and makes
+    report completion scale linearly with the number of highs. Stable numeric
+    IDs let us reject malformed or invented verdicts deterministically.
+    """
+    reports: list[dict[str, Any]] = []
+    mapped: list[Any] = []
+    for finding in findings:
+        try:
+            report = finding.to_report_dict()
+        except Exception:
+            continue
+        item_id = len(mapped)
+        mapped.append(finding)
+        reports.append({
+            "id": item_id,
+            "title": str(report.get("title", ""))[:300],
+            "severity": str(report.get("severity", ""))[:20],
+            "description": str(report.get("description", ""))[:600],
+            "evidence": str(report.get("evidence", ""))[:900],
+            "request_proof": str(report.get("request_proof", ""))[:400],
+            "response_proof": str(report.get("response_proof", ""))[:400],
+            "cve_ids": list(report.get("cve_ids", []) or [])[:8],
+        })
+    if not reports:
+        return []
+
+    prompt = (
+        "Validate each security finding strictly against its own evidence. "
+        "Return one verdict for every supplied numeric id and do not invent ids.\n\n"
+        f"FINDINGS: {json.dumps(reports, separators=(',', ':'))}\n\n"
+        'Respond in JSON: {"verdicts":[{"id":0,"valid":true|false,'
+        '"confidence":"high|medium|low","reasoning":"one evidence-grounded sentence"}]}'
+    )
+    try:
+        resp = await llm_client.complete(
+            prompt=prompt,
+            system_prompt=_SYSTEM,
+            model=reviewer_model or None,
+            json_mode=True,
+            temperature=0.1,
+            max_tokens=min(1800, 220 + len(reports) * 180),
+            use_fallback=False,
+            task="dual_review",
+        )
+    except Exception as exc:
+        logger.debug("[dual_review] batch review call failed: {e}", e=exc)
+        return []
+    parsed = resp.json_content() if resp else None
+    if not isinstance(parsed, dict) or not isinstance(parsed.get("verdicts"), list):
+        return []
+
+    verdicts: list[tuple[Any, dict[str, Any]]] = []
+    seen: set[int] = set()
+    for item in parsed["verdicts"]:
+        if not isinstance(item, dict):
+            continue
+        item_id = item.get("id")
+        if not isinstance(item_id, int) or item_id < 0 or item_id >= len(mapped) or item_id in seen:
+            continue
+        if not isinstance(item.get("valid"), bool):
+            continue
+        seen.add(item_id)
+        verdicts.append((mapped[item_id], {
+            "valid": item["valid"],
+            "confidence": str(item.get("confidence", "low"))[:20],
+            "reasoning": str(item.get("reasoning", ""))[:400],
+            "reviewer_model": getattr(resp, "model", reviewer_model) or reviewer_model,
+        }))
+    return verdicts
 
 
 async def dual_review(findings: list[Any], llm_client: Any, reviewer_model: str = "") -> dict[str, int]:
@@ -88,22 +169,26 @@ async def dual_review(findings: list[Any], llm_client: Any, reviewer_model: str 
     """
     reviewed = 0
     disagreed = 0
+    eligible: list[Any] = []
     for finding in findings:
         severity = getattr(getattr(finding, "severity", None), "value", "") or ""
-        if severity.lower() not in REVIEW_SEVERITIES:
-            continue
-        verdict = await review_finding(finding, llm_client, reviewer_model)
-        if verdict is None:
-            continue
-        reviewed += 1
-        reasoning = dict(getattr(finding, "llm_reasoning", {}) or {})
-        reasoning["dual_review"] = verdict
-        finding.llm_reasoning = reasoning
-        if not verdict["valid"]:
-            disagreed += 1
-            if DISAGREE_TAG not in finding.tags:
-                finding.tags.append(DISAGREE_TAG)
-            finding.confidence = "low"
+        if severity.lower() in REVIEW_SEVERITIES:
+            eligible.append(finding)
+    batch_size = max(1, min(20, int(os.environ.get("VAPT_LLM_REVIEW_BATCH_SIZE", "8"))))
+    for offset in range(0, len(eligible), batch_size):
+        verdict_pairs = await review_findings_batch(
+            eligible[offset:offset + batch_size], llm_client, reviewer_model,
+        )
+        for finding, verdict in verdict_pairs:
+            reviewed += 1
+            reasoning = dict(getattr(finding, "llm_reasoning", {}) or {})
+            reasoning["dual_review"] = verdict
+            finding.llm_reasoning = reasoning
+            if not verdict["valid"]:
+                disagreed += 1
+                if DISAGREE_TAG not in finding.tags:
+                    finding.tags.append(DISAGREE_TAG)
+                finding.confidence = "low"
     if reviewed:
         logger.info(
             "[dual_review] Reviewed {r} crit/high finding(s); {d} disagreed and were flagged",

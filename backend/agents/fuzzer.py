@@ -35,12 +35,14 @@ class FuzzingAgent(BaseAgent):
         super().__init__(AgentType.FUZZER, scope, config)
         self._runner = DockerRunner(config)
         self._llm_client = None
+        self._llm_hypotheses: list[dict[str, Any]] = []
 
     async def execute(self, task: AgentTask) -> list[Finding]:
         """Execute multi-strategy fuzzing."""
         logger.info("[FUZZER] Starting fuzzing")
         self.clear_findings()
         self.clear_tool_runs()
+        self._llm_hypotheses = []
 
         recon_data = task.parameters.get("recon_data", task.result or {})
         enum_data = task.parameters.get("enum_data", {})
@@ -93,6 +95,7 @@ class FuzzingAgent(BaseAgent):
         task.result = {
             "new_endpoints": all_new_endpoints,
             "total_new_endpoints": len(all_new_endpoints),
+            "llm_hypotheses": self._llm_hypotheses,
             "tool_runs": self.get_tool_runs(),
         }
 
@@ -371,23 +374,23 @@ class FuzzingAgent(BaseAgent):
             )
 
             result = await self._llm_client.analyze(prompt, task="triage")
-            if result and "insights" in result:
-                severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
+            if result and isinstance(result.get("insights"), list):
                 for insight in result["insights"][:8]:
-                    finding = Finding(
-                        title=f"[AI-Fuzz] {insight.get('endpoint_pattern', 'Unknown Pattern')}",
-                        description=insight.get("reasoning", ""),
-                        severity=severity_map.get(insight.get("risk", "medium"), Severity.MEDIUM),
-                        agent_source=AgentType.FUZZER,
-                        target=target,
-                        evidence=f"Pattern: {insight.get('endpoint_pattern', '')}\nRecommended test: {insight.get('recommended_test', '')}",
-                        remediation=insight.get("recommended_test", "Manual testing required."),
-                        tags=["llm", "ai-fuzz", insight.get("category", "other")],
-                        confidence="medium",
-                        status="suspected",
-                    )
-                    self._add_finding(finding)
-                logger.info("[FUZZER] LLM identified {count} patterns from fuzzing results", count=len(result["insights"]))
+                    if not isinstance(insight, dict):
+                        continue
+                    self._llm_hypotheses.append({
+                        "endpoint_pattern": str(insight.get("endpoint_pattern") or "")[:500],
+                        "category": str(insight.get("category") or "other")[:80],
+                        "risk_hint": str(insight.get("risk") or "unknown")[:20],
+                        "reasoning": str(insight.get("reasoning") or "")[:1000],
+                        "next_verification": str(insight.get("recommended_test") or "Manual evidence review required.")[:1000],
+                        "status": "hypothesis",
+                        "source": "llm",
+                    })
+                logger.info(
+                    "[FUZZER] LLM produced {count} endpoint hypotheses (not findings)",
+                    count=len(self._llm_hypotheses),
+                )
 
         except Exception as exc:
             logger.debug("[FUZZER] LLM analysis error: {err}", err=exc)

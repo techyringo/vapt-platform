@@ -36,6 +36,8 @@ ARG DOCKER_CLI_VERSION=27.5.1
 RUN apt-get update && apt-get install -y --no-install-recommends \
     nmap curl git dnsutils ca-certificates tar \
     libxml2 libxslt1.1 \
+    libglib2.0-0 libpango-1.0-0 libpangoft2-1.0-0 \
+    libharfbuzz0b libfribidi0 \
     && arch="$(dpkg --print-architecture)" \
     && case "$arch" in \
       amd64) docker_arch="x86_64" ;; \

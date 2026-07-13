@@ -62,6 +62,7 @@ class IntelAgent(BaseAgent):
         super().__init__(AgentType.INTEL, scope, config)
         self._llm_client = None
         self._cve_resolver = None  # lazily built
+        self._llm_hypotheses: list[dict[str, Any]] = []
 
     def _get_cve_resolver(self):
         """Lazily build the LLM+NVD resolver (tools/cve_resolver.py)."""
@@ -91,6 +92,7 @@ class IntelAgent(BaseAgent):
         """
         logger.info("[INTEL] Starting intelligent analysis")
         self.clear_findings()
+        self._llm_hypotheses = []
 
         recon_data = self._merge_phase_context(task.parameters)
         live_urls = recon_data.get("live_urls", [])
@@ -133,6 +135,7 @@ class IntelAgent(BaseAgent):
             "js_endpoints": js_analysis["endpoints"],
             "js_libraries": js_analysis["libraries"],
             "existing_findings_enriched": len(all_findings_so_far),
+            "llm_hypotheses": self._llm_hypotheses,
             "llm_analysis": self._llm_client is not None
                              and bool(self._llm_client.get_available_providers()),
         }
@@ -495,31 +498,30 @@ class IntelAgent(BaseAgent):
                 "3. Data exposure risks\n"
                 "4. Potential attack chains (how vulnerabilities could be combined)\n"
                 "5. Any critical security issues based on the technology stack\n\n"
-                'Respond in JSON:\n{"findings": [{"title": "...", "description": "...", '
-                '"severity": "critical|high|medium|low", "category": "logic-flaw|auth-bypass|'
-                'data-exposure|attack-chain|other", "confidence": "high|medium|low"}]}\n\n'
-                "Only include findings you are confident about. Quality over quantity."
+                'Respond in JSON:\n{"hypotheses": [{"title": "...", "description": "...", '
+                '"category": "logic-flaw|auth-bypass|data-exposure|attack-chain|other", '
+                '"confidence": "high|medium|low", "next_verification": "one safe concrete test"}]}\n\n'
+                "These are hypotheses, not findings. Do not claim exploitability or impact."
             )
 
             result = await self._llm_client.analyze(prompt)
-            if result and "findings" in result:
-                severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
-
-                for f in result["findings"]:
-                    finding = Finding(
-                        title=f"[LLM] {f.get('title', 'Unknown')}",
-                        description=f.get("description", ""),
-                        severity=severity_map.get(f.get("severity", "medium"), Severity.MEDIUM),
-                        agent_source=AgentType.INTEL,
-                        target=target,
-                        evidence=f"LLM Analysis - Category: {f.get('category', 'N/A')}",
-                        remediation="Manual review required. This finding was identified by AI analysis "
-                                    "and should be validated by a security professional.",
-                        tags=["llm", "ai-analysis", f.get("category", "other")],
-                        confidence=f.get("confidence", "medium"),
-                    )
-                    self._add_finding(finding)
-                logger.info("[INTEL] LLM analysis: {count} AI findings", count=len(result["findings"]))
+            if result and isinstance(result.get("hypotheses"), list):
+                for item in result["hypotheses"][:8]:
+                    if not isinstance(item, dict):
+                        continue
+                    self._llm_hypotheses.append({
+                        "title": str(item.get("title") or "Contextual security test")[:200],
+                        "category": str(item.get("category") or "other")[:80],
+                        "reasoning": str(item.get("description") or "")[:1000],
+                        "confidence": str(item.get("confidence") or "low")[:20],
+                        "next_verification": str(item.get("next_verification") or "Run a policy-approved validator and capture request/response or code-flow evidence.")[:1000],
+                        "status": "hypothesis",
+                        "source": "llm",
+                    })
+                logger.info(
+                    "[INTEL] LLM produced {count} contextual hypotheses (not findings)",
+                    count=len(self._llm_hypotheses),
+                )
 
         except Exception as exc:
             logger.warning("[INTEL] LLM analysis failed: {err}", err=exc)

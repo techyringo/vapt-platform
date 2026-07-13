@@ -1234,15 +1234,15 @@ export default function Dashboard() {
                     <div className="card-glass" style={{ padding: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
                         <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Scan Strategy</h3>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Evidence-driven Recommendations</h3>
                           <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            Approved capabilities ranked from live assessment evidence
+                            Engagement policy decides eligibility; AI can only rank approved capabilities
                           </p>
                         </div>
                         <span className="badge badge-informational">{decisions.length} phase{decisions.length === 1 ? '' : 's'}</span>
                       </div>
                       {decisions.length === 0 ? (
-                        <div className="quiet-empty">Decisions appear as each scan phase begins.</div>
+                        <div className="quiet-empty">Recommendations appear as each phase begins. They are recorded for review and are not silently executed.</div>
                       ) : (
                         <div className="coverage-list">
                           {[...decisions].reverse().slice(0, 6).map(decision => (
@@ -1253,9 +1253,14 @@ export default function Dashboard() {
                                   {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
                                 </div>
                               </div>
-                              <span className="badge badge-informational">proposed</span>
+                              <span className="badge badge-informational">{decision.execution?.automatically_executed ? 'executed' : decision.status}</span>
                             </div>
                           ))}
+                        </div>
+                      )}
+                      {decisions.length > 0 && (
+                        <div className="quiet-empty" style={{ marginTop: 10 }}>
+                          Current mode: advisory. Runtime execution remains the deterministic phase plan until the policy-bound action loop is completed.
                         </div>
                       )}
                     </div>

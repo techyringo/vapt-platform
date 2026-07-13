@@ -557,6 +557,10 @@ class ReconAgent(BaseAgent):
         # future distributed worker pass; this gives VA mode broad signal now.
         seeds = seeds[:25]
         extra_args = self.config.tools.get("katana", AppConfig().get_tool_config("katana")).extra_args
+        crawl_seconds = max(30, int(os.environ.get("VAPT_KATANA_CRAWL_DURATION", "240")))
+        tool_timeout = max(crawl_seconds + 30, int(os.environ.get("VAPT_KATANA_TIMEOUT", "330")))
+        if "-ct" not in extra_args and "-crawl-duration" not in extra_args:
+            extra_args = list(extra_args) + ["-ct", f"{crawl_seconds}s"]
 
         from tools.runner import shared_temp_path
         host_path = shared_temp_path(suffix=".txt")
@@ -567,7 +571,7 @@ class ReconAgent(BaseAgent):
             result = await self._runner.run(
                 tool_name="katana",
                 args=["-list", host_path, "-silent", "-jsonl"] + extra_args,
-                timeout=600,
+                timeout=tool_timeout,
             )
             self._record_tool_run(result, "recon")
             if (
@@ -580,7 +584,7 @@ class ReconAgent(BaseAgent):
                 result = await self._runner.run(
                     tool_name="katana",
                     args=["-list", host_path] + extra_args,
-                    timeout=600,
+                    timeout=tool_timeout,
                 )
                 self._record_tool_run(result, "recon")
             if result.stdout.strip():

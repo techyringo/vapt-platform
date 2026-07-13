@@ -52,6 +52,32 @@ def finding_fingerprint(*parts: Any) -> str:
     return hashlib.sha256(material.encode("utf-8", errors="replace")).hexdigest()
 
 
+def _trace_locations(value: Any) -> list[str]:
+    """Extract reproducible locations from a Semgrep data-flow trace.
+
+    Trace payloads vary across releases. Walk the structure without retaining
+    source snippets, credentials, or other raw code.
+    """
+    locations: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            path = node.get("path")
+            start = node.get("start") if isinstance(node.get("start"), dict) else {}
+            if path:
+                label = f"{path}:{start.get('line') or '?'}"
+                if label not in locations:
+                    locations.append(label)
+            for child in node.values():
+                walk(child)
+        elif isinstance(node, list):
+            for child in node:
+                walk(child)
+
+    walk(value)
+    return locations[:12]
+
+
 def _base_finding(
     *,
     source: str,
@@ -116,6 +142,11 @@ def parse_semgrep(payload: dict[str, Any], repository: str) -> list[dict[str, An
         shortlink = metadata.get("shortlink")
         if shortlink:
             references.insert(0, str(shortlink))
+        match_line = start.get("line") or "?"
+        evidence = f"Rule {rule_id} matched {result.get('path') or 'source'}:{match_line}."
+        trace = _trace_locations(extra.get("dataflow_trace"))
+        if trace:
+            evidence += f" Sanitized data-flow locations: {' -> '.join(trace)}."
         findings.append(_base_finding(
             source="semgrep",
             category="sast",
@@ -129,7 +160,7 @@ def parse_semgrep(payload: dict[str, Any], repository: str) -> list[dict[str, An
             end_line=int(end.get("line")) if end.get("line") else None,
             # Source text can contain credentials or customer data. Persist a
             # reproducible location, not the raw matched line, by default.
-            evidence=f"Rule {rule_id} matched {result.get('path') or 'source'}:{start.get('line') or '?'}.",
+            evidence=evidence,
             remediation=str(metadata.get("fix") or metadata.get("remediation") or "Review the data flow and replace the unsafe pattern with the framework's secure API."),
             cve_ids=_identifiers(metadata, r"CVE-\d{4}-\d{4,}"),
             cwe_ids=_identifiers(metadata.get("cwe"), r"CWE-\d+"),

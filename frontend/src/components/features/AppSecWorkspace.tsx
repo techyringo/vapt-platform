@@ -101,6 +101,7 @@ export function AppSecWorkspace() {
 
   const cveCount = (detail?.findings || []).reduce((sum, item) => sum + item.cve_ids.length, 0);
   const verifiedCount = (detail?.findings || []).filter(item => item.status === 'verified').length;
+  const candidateCount = (detail?.findings || []).filter(item => item.status === 'candidate').length;
   const running = detail && ['queued', 'running'].includes(detail.status);
 
   return (
@@ -190,8 +191,8 @@ export function AppSecWorkspace() {
 
               <div className="appsec-metrics">
                 <Metric label="Security observations" value={detail.summary?.total || 0} />
-                <Metric label="Verified findings" value={verifiedCount} tone="danger" />
-                <Metric label="Known CVEs" value={cveCount} tone="amber" />
+                <Metric label="Needs triage" value={candidateCount} tone="danger" />
+                <Metric label="CVE observations" value={cveCount} tone="amber" />
                 <Metric label="Coverage lanes" value={`${Object.values(detail.coverage || {}).filter(item => item.status === 'completed').length}/3`} tone="cyan" />
               </div>
 
@@ -199,15 +200,38 @@ export function AppSecWorkspace() {
                 {Object.entries(laneMeta).map(([key, meta]) => {
                   const state = detail.coverage?.[key] || { status: 'planned', tool: key };
                   const Icon = meta.icon;
+                  const profile = key === 'sast' && state.languages
+                    ? Object.keys(state.languages).slice(0, 4).join(', ')
+                    : key === 'sca' && state.manifests?.length
+                      ? `${state.manifests.length} manifest${state.manifests.length === 1 ? '' : 's'}`
+                      : state.verification || '';
                   return (
                     <article className={`appsec-lane ${statusTone(state.status)}`} key={key}>
                       <div className="appsec-lane-icon"><Icon size={17} /></div>
-                      <div><strong>{meta.label}</strong><span>{meta.description}</span><small>{state.tool} · {state.findings || 0} observations{state.verification ? ` · ${state.verification}` : ''}</small></div>
+                      <div><strong>{meta.label}</strong><span>{meta.description}</span><small>{state.tool} · {state.findings || 0} observations{profile ? ` · ${profile}` : ''}</small></div>
                       <LaneStatus status={state.status} />
                     </article>
                   );
                 })}
               </div>
+
+              <details className="card-glass" style={{ marginTop: 12, padding: 12 }}>
+                <summary style={{ cursor: 'pointer', color: 'var(--text-primary)', fontSize: 12, fontWeight: 700 }}>
+                  Scanner evidence · {detail.tool_runs?.length || 0} runs · {verifiedCount} provider-verified
+                </summary>
+                <div className="coverage-list" style={{ marginTop: 10 }}>
+                  {(detail.tool_runs || []).map((run, index) => (
+                    <div className="coverage-row" key={`${String(run.tool || 'scanner')}-${index}`}>
+                      <div>
+                        <div className="coverage-title">{String(run.tool || 'scanner')}</div>
+                        <div className="coverage-meta">{String(run.lane || 'analysis')} · {Number(run.duration || 0).toFixed(1)}s{run.timed_out ? ' · timed out' : ''}</div>
+                      </div>
+                      <span className={`badge ${run.success ? 'badge-running' : 'badge-failed'}`}>{run.success ? 'captured' : 'failed'}</span>
+                    </div>
+                  ))}
+                  {!detail.tool_runs?.length && <div className="appsec-empty">Scanner run evidence appears here as each lane completes.</div>}
+                </div>
+              </details>
 
               <div className="appsec-findings-header">
                 <div><span className="section-label">Evidence ledger</span><h3>Normalized findings</h3></div>
@@ -242,7 +266,7 @@ function FindingRow({ finding }: { finding: AppSecFinding }) {
       <summary>
         <span className={`appsec-severity ${finding.severity}`}>{finding.severity === 'informational' ? 'info' : finding.severity}</span>
         <div><strong>{finding.title}</strong><span>{finding.path || finding.package || finding.rule_id}{finding.start_line ? `:${finding.start_line}` : ''}</span></div>
-        <div className="appsec-finding-tags"><span>{finding.category}</span>{finding.cve_ids.slice(0, 2).map(cve => <code key={cve}>{cve}</code>)}</div>
+        <div className="appsec-finding-tags"><span>{finding.status}</span><span>{finding.confidence} confidence</span><span>{finding.category}</span>{finding.cve_ids.slice(0, 2).map(cve => <code key={cve}>{cve}</code>)}</div>
       </summary>
       <div className="appsec-finding-body">
         <p>{finding.description}</p>

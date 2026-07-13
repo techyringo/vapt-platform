@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+from collections import Counter
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
@@ -87,6 +88,52 @@ def _json_payload(text: str):
         raise RuntimeError(f"Scanner returned invalid JSON: {exc}") from exc
 
 
+_LANGUAGE_EXTENSIONS = {
+    ".py": "Python", ".js": "JavaScript", ".jsx": "JavaScript",
+    ".ts": "TypeScript", ".tsx": "TypeScript", ".java": "Java",
+    ".go": "Go", ".rb": "Ruby", ".php": "PHP", ".cs": "C#",
+    ".c": "C/C++", ".cc": "C/C++", ".cpp": "C/C++", ".h": "C/C++",
+    ".rs": "Rust", ".kt": "Kotlin", ".swift": "Swift", ".scala": "Scala",
+}
+
+
+def repository_inventory(workspace: Path) -> dict[str, object]:
+    """Return a bounded, non-sensitive codebase inventory for scan coverage."""
+    languages: Counter[str] = Counter()
+    manifests: set[str] = set()
+    manifest_names = {
+        "package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml",
+        "requirements.txt", "poetry.lock", "pyproject.toml", "Pipfile.lock",
+        "go.mod", "go.sum", "pom.xml", "build.gradle", "Cargo.lock",
+        "Gemfile.lock", "composer.lock", "packages.lock.json",
+        "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
+    }
+    files_scanned = 0
+    for path in workspace.rglob("*"):
+        if not path.is_file() or ".git" in path.parts:
+            continue
+        files_scanned += 1
+        language = _LANGUAGE_EXTENSIONS.get(path.suffix.lower())
+        if language:
+            languages[language] += 1
+        if path.name in manifest_names:
+            manifests.add(path.name)
+    return {
+        "files": files_scanned,
+        "languages": dict(languages.most_common(12)),
+        "manifests": sorted(manifests),
+    }
+
+
+def semgrep_rulepacks() -> list[str]:
+    configured = os.environ.get("VAPT_SEMGREP_RULESETS", "p/default,p/security-audit")
+    return list(dict.fromkeys(value.strip() for value in configured.split(",") if value.strip()))[:8]
+
+
+def _deduplicate_findings(findings: list[dict]) -> list[dict]:
+    return list({item["fingerprint"]: item for item in findings}.values())
+
+
 async def run_assessment(assessment_id: str, repository: str, ref: str, config: AppConfig) -> dict:
     repository = validate_repository_url(repository)
     ref = validate_ref(ref)
@@ -103,11 +150,20 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
     store.update_appsec_assessment(assessment_id, {"status": "running", "phase": "checkout", "progress": 5})
     try:
         revision = await _clone(repository, ref, workspace)
+        inventory = repository_inventory(workspace)
+        rulepacks = semgrep_rulepacks()
+        coverage["sast"].update({
+            "languages": inventory["languages"],
+            "files": inventory["files"],
+            "rulepacks": rulepacks,
+        })
+        coverage["sca"].update({"manifests": inventory["manifests"]})
         store.update_appsec_assessment(assessment_id, {"commit_sha": revision, "phase": "sast", "progress": 15})
+        semgrep_configs = [value for rulepack in rulepacks for value in ("--config", rulepack)]
         scanners = [
             (
                 "semgrep", "sast",
-                ["semgrep", "scan", "--config", "p/default", "--json", "--metrics", "off", "--no-autofix", "--disable-version-check", container_workspace],
+                ["semgrep", "scan", *semgrep_configs, "--json", "--metrics", "off", "--no-autofix", "--disable-version-check", container_workspace],
                 parse_semgrep,
             ),
             (
@@ -125,6 +181,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             if result.stdout.strip():
                 parsed = parser(_json_payload(result.stdout), repository)
                 findings.extend(parsed)
+                findings = _deduplicate_findings(findings)
                 coverage[lane].update({"status": "completed", "findings": len(parsed)})
             elif result.success:
                 coverage[lane]["status"] = "completed"
@@ -171,6 +228,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         store.append_appsec_run(assessment_id, lane, truffle_result.to_dict())
         findings.extend(parse_trufflehog(truffle_result.stdout, repository))
         findings = merge_secret_findings(findings)
+        findings = _deduplicate_findings(findings)
 
         if gitleaks_completed or truffle_result.success:
             coverage[lane].update({
