@@ -568,10 +568,12 @@ TOOL_CAPABILITIES: dict[str, ToolCapability] = {
         target_layers=["web"],
         produces=["finding_cve", "finding_exposed_creds", "service_version"],
         consumes=["tech_wordpress"],
-        aggressive=True,
+        # This capability represents the platform's verified, non-destructive
+        # enumeration path. Exploit/brute-force modes are not scheduled here.
+        aggressive=False,
         run_when=["tech_wordpress"],
         evidence=["wordpress_vulnerability", "plugin_version", "theme_version"],
-        notes="Only fires when WordPress is detected in the tech stack.",
+        notes="Only fires after WordPress is actively confirmed; exploit and brute-force modes are excluded.",
     ),
 
     # ── Exploitation ──────────────────────────────────────────────────────────

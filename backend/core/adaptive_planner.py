@@ -7,7 +7,7 @@ executable tool, command, image, or out-of-scope target.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -113,7 +113,7 @@ class AdaptivePlanner:
             "phase": phase,
             "decision_type": "adaptive_capability_plan",
             "status": "proposed",
-            "created_at": datetime.utcnow().isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "policy": {
                 "candidate_source": "deterministic_registry",
                 "aggressive_tools_allowed": False,
