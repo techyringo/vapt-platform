@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlunparse
 
 
 @dataclass(frozen=True)
@@ -62,16 +62,25 @@ class DASTPlanner:
         self,
         *,
         recon_data: dict[str, Any] | None = None,
+        enum_data: dict[str, Any] | None = None,
         fuzz_data: dict[str, Any] | None = None,
         vuln_data: dict[str, Any] | None = None,
         existing_findings: list[Any] | None = None,
     ) -> list[InputCandidate]:
         urls: list[tuple[str, str]] = []
 
+        base_urls = [
+            str(entry.get("url") or "")
+            for entry in (recon_data or {}).get("live_urls") or []
+            if isinstance(entry, dict) and str(entry.get("url") or "").startswith(("http://", "https://"))
+        ]
+
         def add_url(value: Any, source: str) -> None:
             if isinstance(value, dict):
                 value = value.get("url") or value.get("target_url") or value.get("input") or ""
             text = str(value or "").strip()
+            if text.startswith("/") and base_urls:
+                text = urljoin(base_urls[0], text)
             if text.startswith(("http://", "https://")):
                 urls.append((text, source))
 
@@ -81,6 +90,25 @@ class DASTPlanner:
             add_url(entry, "historical_url")
         for entry in (recon_data or {}).get("crawled_urls") or []:
             add_url(entry, "crawled_url")
+        for entry in (enum_data or {}).get("directories") or []:
+            add_url(entry, "content_discovery")
+        for entry in (enum_data or {}).get("js_endpoints") or []:
+            add_url(entry, "javascript_endpoint")
+        # Arjun emits explicit parameter names separately from URLs. Convert
+        # those observations into testable URLs so the proof engine does not
+        # depend on a crawler having already seen the parameter in a query.
+        for result in (enum_data or {}).get("parameters") or []:
+            if not isinstance(result, dict):
+                continue
+            base = str(result.get("url") or "").strip()
+            if base.startswith("/") and base_urls:
+                base = urljoin(base_urls[0], base)
+            if not base.startswith(("http://", "https://")):
+                continue
+            for parameter in result.get("parameters") or []:
+                name = str(parameter or "").strip()
+                if name:
+                    urls.append((self.ensure_parameter(base, name), "parameter_discovery"))
         for entry in (fuzz_data or {}).get("new_endpoints") or []:
             add_url(entry, "fuzzer")
         for key in ("nuclei_findings", "nikto_findings", "cms_findings", "tech_nuclei_findings"):
@@ -251,6 +279,15 @@ class DASTPlanner:
         pairs = parse_qsl(parsed.query, keep_blank_values=True)
         replaced = [(name, value if name == parameter else current) for name, current in pairs]
         return urlunparse(parsed._replace(query=urlencode(replaced, doseq=True)))
+
+    @staticmethod
+    def ensure_parameter(url: str, parameter: str, value: str = "vapt-baseline") -> str:
+        """Return ``url`` with a stable parameter added when it is absent."""
+        parsed = urlparse(url)
+        pairs = parse_qsl(parsed.query, keep_blank_values=True)
+        if not any(name == parameter for name, _current in pairs):
+            pairs.append((parameter, value))
+        return urlunparse(parsed._replace(query=urlencode(pairs, doseq=True)))
 
     @staticmethod
     def _normalise_param_url(url: str, parameter: str) -> str:

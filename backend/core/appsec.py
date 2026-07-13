@@ -221,3 +221,84 @@ def parse_gitleaks(payload: Any, repository: str) -> list[dict[str, Any]]:
             confidence="high",
         ))
     return findings
+
+
+def parse_trufflehog(output: str, repository: str) -> list[dict[str, Any]]:
+    """Parse TruffleHog JSONL without retaining raw or redacted secrets."""
+    import json
+
+    findings: list[dict[str, Any]] = []
+    for line in str(output or "").splitlines():
+        try:
+            item = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(item, dict):
+            continue
+        source_data = item.get("SourceMetadata", {}).get("Data", {})
+        location: dict[str, Any] = {}
+        if isinstance(source_data, dict):
+            for key in ("Filesystem", "Git"):
+                if isinstance(source_data.get(key), dict):
+                    location = source_data[key]
+                    break
+        detector = str(item.get("DetectorName") or item.get("DetectorType") or "credential")
+        path = str(location.get("file") or location.get("path") or "")
+        line_no = location.get("line")
+        try:
+            parsed_line = int(line_no) if line_no not in (None, "") else None
+        except (TypeError, ValueError):
+            parsed_line = None
+        verified = bool(item.get("Verified"))
+        finding = _base_finding(
+            source="trufflehog",
+            category="secret",
+            rule_id=f"trufflehog:{detector}",
+            title=f"{'Verified' if verified else 'Potential'} {detector} credential",
+            description=(
+                "TruffleHog actively verified that this credential is accepted by its provider."
+                if verified
+                else "TruffleHog classified a potential credential; its value is redacted and validity is unconfirmed."
+            ),
+            severity="critical" if verified else "high",
+            repository=repository,
+            path=path,
+            start_line=parsed_line,
+            evidence=(
+                f"Detector {detector} matched {path or 'repository'}:{line_no or '?'}; "
+                f"provider verification={'confirmed' if verified else 'not confirmed'}; value redacted."
+            ),
+            remediation="Immediately revoke or rotate verified credentials, remove them from source/history, and store replacements in an approved secrets manager.",
+            confidence="high" if verified else "medium",
+        )
+        if verified:
+            finding["status"] = "verified"
+        findings.append(finding)
+    return findings
+
+
+def merge_secret_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Prefer provider-verified TruffleHog evidence at the same location."""
+    merged: dict[tuple[str, str, int | None], dict[str, Any]] = {}
+    remainder: list[dict[str, Any]] = []
+    for finding in findings:
+        if finding.get("category") != "secret":
+            remainder.append(finding)
+            continue
+        location_key = str(finding.get("path") or "")
+        if not location_key and finding.get("start_line") is None:
+            location_key = str(finding.get("fingerprint") or finding.get("rule_id") or "unknown")
+        key = (
+            str(finding.get("repository") or ""),
+            location_key,
+            finding.get("start_line"),
+        )
+        existing = merged.get(key)
+        if existing is None:
+            merged[key] = finding
+            continue
+        if finding.get("status") == "verified" or (
+            finding.get("source") == "trufflehog" and existing.get("source") != "trufflehog"
+        ):
+            merged[key] = finding
+    return [*remainder, *merged.values()]

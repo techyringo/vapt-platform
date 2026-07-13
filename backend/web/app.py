@@ -1341,12 +1341,15 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
 
         mgr = get_manager(app)
-        result = await mgr.start_scan(
-            targets=request.targets,
-            mode=request.mode,
-            scan_name=request.name,
-            scope_config=request.scope_config,
-        )
+        try:
+            result = await mgr.start_scan(
+                targets=request.targets,
+                mode=request.mode,
+                scan_name=request.name,
+                scope_config=request.scope_config,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return result
 
     @app.post("/api/import/spec")

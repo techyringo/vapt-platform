@@ -1,4 +1,4 @@
-from core.appsec import parse_gitleaks, parse_semgrep, parse_trivy
+from core.appsec import merge_secret_findings, parse_gitleaks, parse_semgrep, parse_trivy, parse_trufflehog
 from services.appsec_assessment import validate_ref, validate_repository_url
 from database.store import PersistenceStore
 
@@ -60,6 +60,26 @@ def test_gitleaks_parser_never_persists_secret_value() -> None:
     }], REPO)[0]
     assert secret not in str(finding)
     assert "redacted" in finding["evidence"].lower()
+
+
+def test_trufflehog_parser_redacts_and_marks_verified_secret() -> None:
+    output = '{"DetectorName":"AWS","Verified":true,"Raw":"DO-NOT-STORE","Redacted":"ALSO-NO","SourceMetadata":{"Data":{"Filesystem":{"file":"config.env","line":7}}}}'
+    finding = parse_trufflehog(output, REPO)[0]
+
+    assert finding["status"] == "verified"
+    assert finding["severity"] == "critical"
+    assert finding["path"] == "config.env"
+    assert "DO-NOT-STORE" not in str(finding)
+    assert "ALSO-NO" not in str(finding)
+
+
+def test_verified_secret_replaces_same_location_pattern_candidate() -> None:
+    gitleaks = parse_gitleaks([{"RuleID": "generic", "File": "config.env", "StartLine": 7}], REPO)[0]
+    trufflehog = parse_trufflehog('{"DetectorName":"AWS","Verified":true,"SourceMetadata":{"Data":{"Filesystem":{"file":"config.env","line":7}}}}', REPO)[0]
+
+    merged = merge_secret_findings([gitleaks, trufflehog])
+    assert len(merged) == 1
+    assert merged[0]["source"] == "trufflehog"
 
 
 def test_repository_validation_rejects_credentials_and_unapproved_hosts() -> None:

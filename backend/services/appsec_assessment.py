@@ -10,7 +10,7 @@ import shutil
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse
 
-from core.appsec import parse_gitleaks, parse_semgrep, parse_trivy
+from core.appsec import merge_secret_findings, parse_gitleaks, parse_semgrep, parse_trivy, parse_trufflehog
 from core.config import AppConfig
 from core.live_log import tool_log_context
 from database.store import PersistenceStore
@@ -98,7 +98,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
     coverage: dict[str, dict] = {
         "sast": {"status": "planned", "tool": "semgrep", "findings": 0},
         "sca": {"status": "planned", "tool": "trivy", "findings": 0},
-        "secrets": {"status": "planned", "tool": "gitleaks", "findings": 0},
+        "secrets": {"status": "planned", "tool": "gitleaks + trufflehog", "findings": 0},
     }
     store.update_appsec_assessment(assessment_id, {"status": "running", "phase": "checkout", "progress": 5})
     try:
@@ -149,14 +149,42 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             timeout=600,
         )
         store.append_appsec_run(assessment_id, lane, result.to_dict())
+        gitleaks_completed = False
         if report_path.exists():
             parsed = parse_gitleaks(_json_payload(report_path.read_text(encoding="utf-8")), repository)
             findings.extend(parsed)
-            coverage[lane].update({"status": "completed", "findings": len(parsed)})
+            gitleaks_completed = True
         elif result.success:
-            coverage[lane]["status"] = "completed"
+            gitleaks_completed = True
+
+        # TruffleHog complements Gitleaks with broader classification and an
+        # optional provider-verification pass. External verification is off by
+        # default because it contacts credential providers; enable it only
+        # under an engagement policy that permits those validation requests.
+        active_verification = os.environ.get("VAPT_SECRET_ACTIVE_VERIFICATION", "false").lower() in {"1", "true", "yes"}
+        truffle_args = ["filesystem", container_workspace, "--json", "--no-update"]
+        if active_verification:
+            truffle_args.extend(["--results=verified,unknown"])
         else:
-            coverage[lane].update({"status": "unavailable", "error": (result.stderr or "Scanner unavailable")[-500:]})
+            truffle_args.extend(["--no-verification", "--results=unverified,unknown"])
+        truffle_result = await runner.run_local("trufflehog", truffle_args, timeout=900)
+        store.append_appsec_run(assessment_id, lane, truffle_result.to_dict())
+        findings.extend(parse_trufflehog(truffle_result.stdout, repository))
+        findings = merge_secret_findings(findings)
+
+        if gitleaks_completed or truffle_result.success:
+            coverage[lane].update({
+                "status": "completed",
+                "findings": sum(1 for item in findings if item.get("category") == "secret"),
+                "verification": "active" if active_verification else "classification-only",
+                "detectors": {
+                    "gitleaks": "completed" if gitleaks_completed else "unavailable",
+                    "trufflehog": "completed" if truffle_result.success else "unavailable",
+                },
+            })
+        else:
+            errors = " | ".join(filter(None, [result.stderr, truffle_result.stderr]))
+            coverage[lane].update({"status": "unavailable", "error": (errors or "Secret scanners unavailable")[-500:]})
 
         store.replace_appsec_findings(assessment_id, findings)
         unavailable = [lane for lane, state in coverage.items() if state["status"] == "unavailable"]

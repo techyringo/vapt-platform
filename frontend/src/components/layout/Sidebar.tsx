@@ -1,7 +1,7 @@
 'use client';
 
 import type React from 'react';
-import { Bot, Code2, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
+import { Code2, GitBranch, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
 
 type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
 
@@ -34,15 +34,14 @@ interface SidebarProps {
   onTabChange: (tab: Tab) => void;
   scanCount: number;
   findingCount: number;
-  agentCount: number;
-  toolCount: number;
+  attackPathCount: number;
   connected: boolean;
   apiHealthy: boolean | null;
 }
 
 export function Sidebar({
   activeTab, onTabChange,
-  scanCount, findingCount, agentCount, toolCount,
+  scanCount, findingCount, attackPathCount,
   connected, apiHealthy,
 }: SidebarProps) {
   return (
@@ -64,11 +63,12 @@ export function Sidebar({
 
       {/* Nav items */}
       <nav className="sidebar-nav" aria-label="Main navigation">
-        <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Dashboard" count={scanCount}     onClick={() => onTabChange('dashboard')} />
-        <SidebarItem active={activeTab === 'appsec'}    icon={Code2}          label="AppSec"                         onClick={() => onTabChange('appsec')} />
-        <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings"  count={findingCount}  onClick={() => onTabChange('findings')} />
-        <SidebarItem active={activeTab === 'agents'}    icon={Bot}             label="Agents"    count={agentCount}    onClick={() => onTabChange('agents')} />
-        <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Execution" count={toolCount}     onClick={() => onTabChange('tools')} />
+        <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Assessments" count={scanCount} onClick={() => onTabChange('dashboard')} />
+        <SidebarItem active={activeTab === 'appsec'}    icon={Code2}          label="Code Security"                 onClick={() => onTabChange('appsec')} />
+        <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings" count={findingCount}  onClick={() => onTabChange('findings')} />
+        <SidebarItem active={activeTab === 'agents'}    icon={GitBranch}       label="Attack Paths" count={attackPathCount} onClick={() => onTabChange('agents')} />
+        <div className="sidebar-section-label">Administration</div>
+        <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Operations"                    onClick={() => onTabChange('tools')} />
         <SidebarItem active={activeTab === 'config'}    icon={Settings}        label="Settings"                        onClick={() => onTabChange('config')} />
       </nav>
 

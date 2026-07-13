@@ -153,6 +153,18 @@
 .appsec-empty-large { display: grid; place-items: center; align-content: center; min-height: 460px; gap: 8px; }
 .appsec-empty-large strong { color: var(--text-primary); font-size: 13px; }
 
+.sidebar-section-label { margin: 12px 10px 4px; color: var(--text-muted); font-size: 8px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+.assessment-policy-box { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--bg-elevated); }
+.intensity-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.intensity-option { display: grid; gap: 3px; min-width: 0; padding: 8px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-card); color: var(--text-secondary); text-align: left; cursor: pointer; }
+.intensity-option strong { color: var(--text-primary); font-size: 11px; }
+.intensity-option span { color: var(--text-muted); font-size: 9px; line-height: 1.35; }
+.intensity-option.active { border-color: var(--accent-border); background: var(--accent-dim); }
+.intensity-option.active strong { color: var(--accent); }
+.policy-confirmation { display: flex; align-items: flex-start; gap: 8px; color: var(--text-secondary); font-size: 11px; line-height: 1.45; }
+.policy-confirmation input { margin-top: 2px; accent-color: var(--accent); }
+.policy-confirmation.warning { color: var(--medium); }
+
 @media (max-width: 1100px) {
   .appsec-launch-grid { grid-template-columns: 1fr 1fr; }
   .appsec-field-wide { grid-column: 1 / -1; }
@@ -171,6 +183,7 @@
   .appsec-finding summary { grid-template-columns: auto minmax(0,1fr); }
   .appsec-finding-tags { grid-column: 2; justify-content: start; }
   .appsec-finding-body { padding-left: 12px; }
+  .intensity-grid { grid-template-columns: 1fr; }
 }
 
 /* ─── Light theme base ──────────────────────────────────────────── */
@@ -1203,6 +1216,49 @@ select.field option { background: var(--bg-elevated); color: var(--text-primary)
   animation: expand-down 150ms ease;
 }
 
+.finding-proof-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.finding-proof-grid > div {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.16);
+  overflow: hidden;
+}
+.finding-proof-grid span {
+  display: block;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.finding-proof-grid pre {
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  color: var(--text-secondary);
+  font: 11px/1.55 var(--font-jetbrains), monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.finding-poc-steps {
+  display: grid;
+  gap: 7px;
+  padding: 10px 12px 10px 30px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(0,0,0,0.1);
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
 /* ═══════════════════════════════════════════════════════════════════
    AGENT CARDS
 ═══════════════════════════════════════════════════════════════════ */
@@ -1478,6 +1534,7 @@ select.field option { background: var(--bg-elevated); color: var(--text-primary)
   .kpi-grid    { grid-template-columns: 1fr 1fr; }
   .phase-grid  { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .agents-grid { grid-template-columns: 1fr; }
+  .finding-proof-grid { grid-template-columns: 1fr; }
   .app-header  { padding: 0 14px; }
   .header-controls .status-pill:not(.always-show) { display: none; }
 }

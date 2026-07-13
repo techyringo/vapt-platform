@@ -10,18 +10,13 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleStop,
-  Command,
   Download,
   FileText,
-  Gauge,
-  Info,
   LayoutDashboard,
   Moon,
   Play,
-  Sun,
   RefreshCw,
   Server,
-  Settings,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -29,13 +24,12 @@ import {
   Trash2,
   WifiOff,
   Wrench,
-  XCircle,
 } from 'lucide-react';
 
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentDecision, AgentStatus, AttackChainResult, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentDecision, AgentStatus, AssetGraph, AttackChainResult, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -195,6 +189,11 @@ function eventLog(event: SSEEvent): LogMessage | null {
     const phase = event.phase || event.data?.phase;
     return phase ? { msg: `Phase changed → ${formatPhase(phase)}`, level: 'info', time } : null;
   }
+  if (event.type === 'phase_complete' || event.type === 'surface_update') {
+    const health = event.target_health?.status;
+    const suffix = health ? ` · target ${health}` : '';
+    return { msg: `${event.message || `${formatPhase(event.phase)} evidence persisted`}${suffix}`, level: health === 'unreachable' ? 'warn' : 'success', time };
+  }
   if (event.type === 'scan_started') {
     const target = Array.isArray(event.targets) ? event.targets.join(', ') : event.scan_id;
     return { msg: `Scan started: ${target}`, level: 'success', time };
@@ -216,10 +215,10 @@ export default function Dashboard() {
 	  const [agentStatus,    setAgentStatus]    = useState<Record<string, AgentStatus>>({});
 	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
 	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
+  const [assetGraph,      setAssetGraph]      = useState<AssetGraph | null>(null);
   const [decisions,      setDecisions]      = useState<AgentDecision[]>([]);
   const [attackChains,   setAttackChains]   = useState<AttackChainResult | null>(null);
   const [modes,          setModes]          = useState<ScanMode[]>([]);
-  const [nvdStats,       setNvdStats]       = useState<NVDStats | null>(null);
   const [toolsStatus,    setToolsStatus]    = useState<Record<string, any>>({});
   const [dockerInfo,     setDockerInfo]     = useState<any>(null);
   const [runtimeLogs,    setRuntimeLogs]    = useState<RuntimeLogFile[]>([]);
@@ -247,6 +246,9 @@ export default function Dashboard() {
   const [outOfScopeInput, setOutOfScopeInput] = useState('');
   const [scanMode,    setScanMode]    = useState('va_only');
   const [scanName,    setScanName]    = useState('');
+  const [intensity, setIntensity] = useState<'safe' | 'standard' | 'lab'>('safe');
+  const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
+  const [labTargetConfirmed, setLabTargetConfirmed] = useState(false);
 
   const logRef           = useRef<HTMLDivElement>(null);
   const seenEventsRef    = useRef<Set<string>>(new Set());
@@ -344,6 +346,14 @@ export default function Dashboard() {
       absorbEvent(event);
       return;
     }
+    if (event.type === 'phase_complete' || event.type === 'surface_update') {
+      if (event.scan_id && event.scan_id === selectedScanIdRef.current) {
+        api.getAssetGraph(event.scan_id).then(setAssetGraph).catch(() => {});
+        api.getToolRuns(event.scan_id).then(r => setToolRuns(r.tool_runs)).catch(() => {});
+      }
+      absorbEvent(event);
+      return;
+    }
     if (event.type === 'scan_started') {
       api.listScans()
         .then(list => {
@@ -362,8 +372,9 @@ export default function Dashboard() {
       if (deletedId && deletedId === selectedScanIdRef.current) {
         setSelectedScanId(null);
         setFindings([]);
-        setAgentStatus({});
-        setToolRuns([]);
+      setAgentStatus({});
+      setToolRuns([]);
+      setAssetGraph(null);
       }
       absorbEvent(event);
       return;
@@ -405,7 +416,6 @@ export default function Dashboard() {
     if (modeList.status === 'fulfilled') setModes(modeList.value.modes);
     if (health.status === 'fulfilled') {
       setApiHealthy(true);
-      setNvdStats(health.value.nvd);
     } else {
       setApiHealthy(false);
     }
@@ -429,6 +439,7 @@ export default function Dashboard() {
 	    setAgentStatus({});
 	    setToolRuns([]);
 	    setCoverage(null);
+	    setAssetGraph(null);
 	    setDecisions([]);
 	    setAttackChains(null);
 	    setLoadingFindings(true);
@@ -437,13 +448,15 @@ export default function Dashboard() {
 	      api.getAgentStatus(selectedScan.scan_id),
 	      api.getToolRuns(selectedScan.scan_id),
 	      api.getCoverage(selectedScan.scan_id),
+	      api.getAssetGraph(selectedScan.scan_id),
 	      api.getDecisions(selectedScan.scan_id),
 	      api.getAttackChains(selectedScan.scan_id),
-	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
+	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes, assetRes, decisionsRes, chainsRes]) => {
 	      if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value.findings);
 	      if (agentRes.status === 'fulfilled')    setAgentStatus(agentRes.value.agents);
 	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
 	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	      if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	      if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	      if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	    }).finally(() => setLoadingFindings(false));
@@ -470,11 +483,13 @@ export default function Dashboard() {
 	      Promise.allSettled([
 	        api.getToolRuns(selectedScan.scan_id),
 	        api.getCoverage(selectedScan.scan_id),
+	        api.getAssetGraph(selectedScan.scan_id),
 	        api.getDecisions(selectedScan.scan_id),
 	        api.getAttackChains(selectedScan.scan_id),
-	      ]).then(([toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
+	      ]).then(([toolRunRes, coverageRes, assetRes, decisionsRes, chainsRes]) => {
 	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
 	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	        if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	        if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	        if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	      })
@@ -517,14 +532,19 @@ export default function Dashboard() {
   const startScan = async () => {
     const targets = targetInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
     const outOfScope = outOfScopeInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
-    if (!targets.length) return;
+    if (!targets.length || !authorizationConfirmed || (intensity === 'lab' && !labTargetConfirmed)) return;
     setStarting(true);
     try {
       const result = await api.startScan(
         targets,
         scanMode,
         scanName || `Scan ${new Date().toLocaleDateString()}`,
-        outOfScope.length ? { out_of_scope: outOfScope } : undefined,
+        {
+          out_of_scope: outOfScope,
+          intensity,
+          authorization_confirmed: authorizationConfirmed,
+          lab_target_confirmed: intensity === 'lab' && labTargetConfirmed,
+        },
       );
       setSelectedScanId(result.scan_id);
       setFindings([]);
@@ -533,6 +553,8 @@ export default function Dashboard() {
       setTargetInput('');
       setOutOfScopeInput('');
       setScanName('');
+      setAuthorizationConfirmed(false);
+      setLabTargetConfirmed(false);
       toast.success('Scan launched', `${targets.join(', ')} is now being assessed`);
       await refreshAll();
     } catch (e: any) {
@@ -624,8 +646,14 @@ export default function Dashboard() {
     [severityFilter, sortedFindings, showQuarantined],
   );
   const quarantinedCount = useMemo(() => findings.filter(f => f.quarantined).length, [findings]);
+  const verifiedFindings = useMemo(
+    () => findings.filter(f => f.status === 'confirmed' && !f.quarantined),
+    [findings],
+  );
+  const candidateFindings = Math.max(0, findings.length - verifiedFindings.length);
+  const surfaceCount = assetGraph?.total_assets || 0;
 
-  const priorityFindings   = sortedFindings.slice(0, 8);
+  const priorityFindings   = [...verifiedFindings, ...sortedFindings.filter(item => !verifiedFindings.includes(item))].slice(0, 8);
   const agentEntries       = useMemo(() => Object.entries(agentStatus), [agentStatus]);
   const failedToolRuns     = useMemo(() => toolRuns.filter(run => !run.success), [toolRuns]);
   const totalFindings      = Object.values(severityCounts).reduce((s, v) => s + v, 0);
@@ -708,12 +736,12 @@ export default function Dashboard() {
   }, []);
 
   const commandActions: CommandAction[] = [
-    { id: 'nav-dashboard', group: 'Navigate', label: 'Dashboard', sub: 'Overview & launch', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview', run: () => setActiveTab('dashboard') },
+    { id: 'nav-dashboard', group: 'Navigate', label: 'Assessments', sub: 'Authorised scopes and live execution', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview scan dast', run: () => setActiveTab('dashboard') },
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
-    { id: 'nav-agents', group: 'Navigate', label: 'Agents', sub: 'Scan agents & tool runs', icon: Bot, hint: ['3'], keywords: 'roster pipeline', run: () => setActiveTab('agents') },
-    { id: 'nav-tools', group: 'Navigate', label: 'Tools', sub: 'Readiness & logs', icon: Wrench, hint: ['4'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
+    { id: 'nav-agents', group: 'Navigate', label: 'Attack Paths', sub: 'Evidence chains and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence', run: () => setActiveTab('agents') },
+    { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['4'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
-      id: 'act-new-scan', group: 'Actions', label: 'New scan', sub: 'Open the launch panel', icon: Play, keywords: 'start run target',
+      id: 'act-new-scan', group: 'Actions', label: 'New assessment', sub: 'Define an authorised scope', icon: Play, keywords: 'start run target',
       run: () => { setActiveTab('dashboard'); if (targetInput.trim()) startScan(); },
     },
     { id: 'act-refresh', group: 'Actions', label: 'Refresh data', icon: RefreshCw, hint: ['R'], keywords: 'reload sync', run: () => handleRefresh() },
@@ -748,8 +776,7 @@ export default function Dashboard() {
         onTabChange={setActiveTab}
         scanCount={scans.length}
         findingCount={totalFindings}
-        agentCount={agentEntries.length}
-        toolCount={capabilityCoverage.reduce((sum, [, group]) => sum + group.gaps, 0)}
+        attackPathCount={attackChains?.summary.total || 0}
         connected={connected}
         apiHealthy={apiHealthy}
       />
@@ -820,8 +847,8 @@ export default function Dashboard() {
                     </h2>
                     <p style={{ marginTop: 5, fontSize: 13, color: 'var(--text-secondary)', lineHeight: 1.6, maxWidth: 700 }}>
                       {selectedScan
-                        ? `${selectedScan.targets?.join(', ')} is under assessment. Agent telemetry, severity drift, and reports update in real time.`
-                        : 'Configure your targets below and launch a scan. The workspace populates with agent progress, live findings, and exportable reports.'}
+                        ? `${selectedScan.targets?.join(', ')} is under assessment. Verified surface evidence, test decisions and findings update in real time.`
+                        : 'Define an authorised scope and launch an assessment. The workspace will show live application surfaces, validation progress and evidence-backed findings.'}
                     </p>
                   </div>
 
@@ -849,10 +876,10 @@ export default function Dashboard() {
 
                 {/* KPI cards */}
                 <section className="kpi-grid">
-                  <MetricCard icon={Activity}      label="Active Scans"  value={activeScans}                  sub={`${scans.length} total`}                      tone="cyan" />
-                  <MetricCard icon={Bug}           label="Total Findings" value={totalFindings}               sub={selectedScan ? selectedScan.name : 'no scan'}  tone="red" />
-                  <MetricCard icon={Boxes}         label="Docker Tools"  value={toolCounts.docker}             sub={dockerReady ? 'daemon reachable' : 'not confirmed'} tone="emerald" />
-                  <MetricCard icon={Gauge}         label="NVD Lookups"   value={nvdStats?.total_lookups || 0} sub={`${nvdStats?.verified || 0} verified`}          tone="amber" />
+                  <MetricCard icon={Activity}      label="Active Assessments" value={activeScans} sub={`${scans.length} total`} tone="cyan" />
+                  <MetricCard icon={ShieldCheck}   label="Verified Findings" value={verifiedFindings.length} sub="report eligible" tone="red" />
+                  <MetricCard icon={Target}        label="Discovered Surface" value={surfaceCount} sub="durable evidence objects" tone="emerald" />
+                  <MetricCard icon={Bug}           label="Candidate Leads" value={candidateFindings} sub="requires validation" tone="amber" />
                 </section>
 
                 {/* Workbench */}
@@ -867,6 +894,12 @@ export default function Dashboard() {
                     setScanMode={setScanMode}
                     scanName={scanName}
                     setScanName={setScanName}
+                    intensity={intensity}
+                    setIntensity={setIntensity}
+                    authorizationConfirmed={authorizationConfirmed}
+                    setAuthorizationConfirmed={setAuthorizationConfirmed}
+                    labTargetConfirmed={labTargetConfirmed}
+                    setLabTargetConfirmed={setLabTargetConfirmed}
                     activeModes={activeModes}
                     selectedMode={selectedMode}
                     starting={starting}
@@ -1004,7 +1037,7 @@ export default function Dashboard() {
                         )}
                       </div>
 
-                      {/* Priority findings + agent state */}
+                      {/* Priority findings + live surface */}
                       <div style={{ borderTop: '1px solid var(--border)', paddingTop: 14, display: 'grid', gridTemplateColumns: 'minmax(0,1fr) 280px', gap: 14 }}>
                         <div>
                           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 10 }}>
@@ -1039,21 +1072,18 @@ export default function Dashboard() {
                         </div>
 
                         <div style={{ borderLeft: '1px solid var(--border)', paddingLeft: 14 }}>
-                          <span className="section-label" style={{ display: 'block', marginBottom: 10 }}>Agent State</span>
-                          {agentEntries.length === 0 ? (
-                            <div className="quiet-empty">Agents appear when a scan starts.</div>
+                          <span className="section-label" style={{ display: 'block', marginBottom: 10 }}>Live Attack Surface</span>
+                          {!assetGraph || assetGraph.total_assets === 0 ? (
+                            <div className="quiet-empty">Verified hosts, URLs, technologies and parameters appear after each phase.</div>
                           ) : (
-                            <div>
-                              {agentEntries.map(([name, status]) => (
-                                <div key={name} className="agent-line">
+                            <div style={{ display: 'grid', gap: 8 }}>
+                              {Object.entries(assetGraph.summary).slice(0, 8).map(([type, count]) => (
+                                <div key={type} className="agent-line">
                                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
                                     <span style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 11, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-                                      {name}
+                                      {type.replaceAll('_', ' ')}
                                     </span>
-                                    <span className={`badge ${agentBadgeClass(status.status)}`}>{status.status}</span>
-                                  </div>
-                                  <div className="progress-bar" style={{ marginTop: 6 }}>
-                                    <div className="progress-fill" style={{ width: `${status.progress_pct || (status.status === 'completed' ? 100 : 0)}%` }} />
+                                    <span className="badge badge-informational">{count}</span>
                                   </div>
                                 </div>
                               ))}
@@ -1167,16 +1197,16 @@ export default function Dashboard() {
             </section>
           )}
 
-          {/* ── AGENTS TAB ────────────────────────────────── */}
+          {/* ── ATTACK PATHS TAB ──────────────────────────── */}
           {activeTab === 'agents' && (
             <section>
               <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <Bot size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
                   <div>
-                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Agent Roster</h2>
+                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Attack Paths & Decisions</h2>
                     <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {agentEntries.length} agents · {agentProgress}% avg progress
+                      {attackChains?.summary.verified || 0} verified paths · {decisions.length} recorded decisions
                     </p>
                   </div>
                 </div>
@@ -1194,27 +1224,19 @@ export default function Dashboard() {
               </div>
 
               {!selectedScan ? (
-                <StateView variant="empty" icon={Bot} title="No scan selected" body="Agent status appears here once an engagement starts." />
+                <StateView variant="empty" icon={Bot} title="No assessment selected" body="Select an assessment to inspect its evidence paths and policy-bound decisions." />
               ) : loadingInitial ? (
                 <div className="agents-grid">
                   {Array.from({ length: 6 }).map((_, i) => <SkeletonAgentCard key={i} />)}
                 </div>
-              ) : agentEntries.length === 0 ? (
-                <StateView variant="empty" icon={Activity} title="Agents waiting" body="The roster populates as the backend dispatches work." />
               ) : (
                 <div style={{ display: 'grid', gap: 16 }}>
-	                  <div className="agents-grid">
-	                    {agentEntries.map(([name, status], index) => (
-	                      <AgentCard key={name} name={name} status={status} index={index} />
-	                    ))}
-	                  </div>
-
                     <div className="card-glass" style={{ padding: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
                         <div>
                           <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Scan Strategy</h3>
                           <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            Capabilities selected from live scan evidence for each assessment phase
+                            Approved capabilities ranked from live assessment evidence
                           </p>
                         </div>
                         <span className="badge badge-informational">{decisions.length} phase{decisions.length === 1 ? '' : 's'}</span>
@@ -1231,7 +1253,7 @@ export default function Dashboard() {
                                   {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
                                 </div>
                               </div>
-                              <span className="badge badge-completed">planned</span>
+                              <span className="badge badge-informational">proposed</span>
                             </div>
                           ))}
                         </div>
@@ -1273,13 +1295,31 @@ export default function Dashboard() {
                       </div>
                     )}
 
+                    <details className="card-glass" style={{ padding: 14 }}>
+                      <summary style={{ cursor: 'pointer', color: 'var(--text-primary)', fontSize: 13, fontWeight: 700 }}>
+                        Execution stages · {agentEntries.length || 0} · {agentProgress}% complete
+                      </summary>
+                      <p style={{ margin: '7px 0 12px', fontSize: 11, color: 'var(--text-secondary)' }}>
+                        Internal workflow health is shown for troubleshooting; findings and evidence remain the customer record.
+                      </p>
+                      {agentEntries.length === 0 ? (
+                        <div className="quiet-empty">Execution stages appear when the assessment is dispatched.</div>
+                      ) : (
+                        <div className="agents-grid">
+                          {agentEntries.map(([name, status], index) => (
+                            <AgentCard key={name} name={name} status={status} index={index} />
+                          ))}
+                        </div>
+                      )}
+                    </details>
+
 	                  {coverage && (
 	                    <div className="card-glass" style={{ padding: 14 }}>
 	                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
 	                        <div>
-	                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Coverage</h3>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Assessment Completeness</h3>
 	                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-	                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} blind spots
+                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} limitations
 	                          </p>
 	                        </div>
 	                        <span className={`badge ${(coverage.summary.blind_spots || 0) ? 'badge-failed' : 'badge-completed'}`}>
@@ -1371,9 +1411,9 @@ export default function Dashboard() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
                 <Wrench size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
                 <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Execution Coverage</h2>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Operations</h2>
                   <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    Capability coverage across approved local, container and API runtimes
+                    Administrative health for approved local, container and API runners
                   </p>
                 </div>
               </div>
@@ -1382,7 +1422,7 @@ export default function Dashboard() {
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
                 <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
                 <MetricCard icon={Server}        label="Ready Runtimes"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="behind capability adapters" tone="cyan" />
-                <MetricCard icon={Download}      label="Coverage Gaps"     value={Object.values(toolsStatus).filter((t: any) => t.availability !== 'ready').length} sub="need runtime or credential" tone="amber" />
+                <MetricCard icon={Download}      label="Needs Setup"       value={Object.values(toolsStatus).filter((t: any) => t.availability !== 'ready').length} sub="optional runner or credential" tone="amber" />
               </div>
 
               <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
@@ -1448,7 +1488,7 @@ export default function Dashboard() {
                           </div>
                         </div>
                         <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
-                          {complete ? 'covered' : `${group.gaps} gap${group.gaps === 1 ? '' : 's'}`}
+                          {complete ? 'ready' : `${group.gaps} need${group.gaps === 1 ? 's' : ''} setup`}
                         </span>
                       </div>
                     );
@@ -1471,15 +1511,6 @@ export default function Dashboard() {
   );
 }
 
-/* ─── agentBadgeClass helper (local) ─── */
-function agentBadgeClass(status?: string) {
-  if (status === 'running')   return 'badge-running';
-  if (status === 'completed') return 'badge-completed';
-  if (status === 'failed' || status === 'cancelled') return 'badge-failed';
-  if (status === 'skipped')   return 'badge-skipped';
-  return 'badge-idle';
-}
-
 /* ─── LaunchPanel (inline — tightly coupled to page state) ─── */
 interface LaunchPanelProps {
   targetInput: string;
@@ -1490,6 +1521,12 @@ interface LaunchPanelProps {
   setScanMode: (v: string) => void;
   scanName: string;
   setScanName: (v: string) => void;
+  intensity: 'safe' | 'standard' | 'lab';
+  setIntensity: (v: 'safe' | 'standard' | 'lab') => void;
+  authorizationConfirmed: boolean;
+  setAuthorizationConfirmed: (v: boolean) => void;
+  labTargetConfirmed: boolean;
+  setLabTargetConfirmed: (v: boolean) => void;
   activeModes: ScanMode[];
   selectedMode: ScanMode;
   starting: boolean;
@@ -1503,6 +1540,9 @@ function LaunchPanel({
   outOfScopeInput, setOutOfScopeInput,
   scanMode, setScanMode,
   scanName, setScanName,
+  intensity, setIntensity,
+  authorizationConfirmed, setAuthorizationConfirmed,
+  labTargetConfirmed, setLabTargetConfirmed,
   activeModes, selectedMode,
   starting, onStart,
   onRefresh, refreshing,
@@ -1512,14 +1552,14 @@ function LaunchPanel({
       {/* Title + exploit badge */}
       <div style={{ marginBottom: 14 }}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 4 }}>
-          <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Launch Scan</h2>
+          <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>New Assessment</h2>
           <span style={{
             fontSize: 10, padding: '2px 8px', borderRadius: 6, fontWeight: 600,
             border: selectedMode.exploit ? '1px solid rgba(244,63,94,0.35)' : '1px solid rgba(34,197,94,0.35)',
             background: selectedMode.exploit ? 'rgba(244,63,94,0.09)' : 'rgba(34,197,94,0.09)',
             color: selectedMode.exploit ? 'var(--critical)' : 'var(--low)',
           }}>
-            {selectedMode.exploit ? 'EXPLOIT ON' : 'VA SAFE'}
+            {selectedMode.exploit ? 'PROOF VALIDATION' : 'NON-INTRUSIVE'}
           </span>
         </div>
         <p style={{ fontSize: 12, color: 'var(--text-secondary)' }}>{selectedMode.description}</p>
@@ -1527,7 +1567,7 @@ function LaunchPanel({
 
       <div style={{ display: 'grid', gap: 12 }}>
         <label>
-          <div className="section-label" style={{ marginBottom: 6 }}>Targets</div>
+          <div className="section-label" style={{ marginBottom: 6 }}>Authorised targets</div>
           <textarea
             value={targetInput}
             onChange={e => setTargetInput(e.target.value)}
@@ -1575,15 +1615,46 @@ function LaunchPanel({
           </label>
         </div>
 
-        {/* Agent pipeline preview */}
+        <div className="assessment-policy-box">
+          <div className="section-label">Execution policy</div>
+          <div className="intensity-grid" role="group" aria-label="Assessment intensity">
+            {([
+              ['safe', 'Safe', '2 req/s · 3k requests'],
+              ['standard', 'Standard', '5 req/s · 15k requests'],
+              ['lab', 'Lab', '20 req/s · isolated targets only'],
+            ] as const).map(([value, label, detail]) => (
+              <button
+                type="button"
+                key={value}
+                className={`intensity-option${intensity === value ? ' active' : ''}`}
+                onClick={() => { setIntensity(value); if (value !== 'lab') setLabTargetConfirmed(false); }}
+                aria-pressed={intensity === value}
+              >
+                <strong>{label}</strong><span>{detail}</span>
+              </button>
+            ))}
+          </div>
+          <label className="policy-confirmation">
+            <input type="checkbox" checked={authorizationConfirmed} onChange={event => setAuthorizationConfirmed(event.target.checked)} />
+            <span>I own these targets or have explicit written authorization to test them.</span>
+          </label>
+          {intensity === 'lab' && (
+            <label className="policy-confirmation warning">
+              <input type="checkbox" checked={labTargetConfirmed} onChange={event => setLabTargetConfirmed(event.target.checked)} />
+              <span>Every target is an isolated lab such as Juice Shop; high-volume testing is permitted.</span>
+            </label>
+          )}
+        </div>
+
+        {/* Assessment workflow preview */}
         <div style={{
           borderRadius: 8, border: '1px solid var(--border)',
           background: 'rgba(0,0,0,0.12)', padding: '10px 12px',
         }}>
           <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 8 }}>
-            <span className="section-label">Agent pipeline</span>
+            <span className="section-label">Assessment workflow</span>
             <span style={{ fontSize: 11, color: 'var(--text-muted)', fontFamily: 'var(--font-jetbrains), monospace' }}>
-              {selectedMode.agents.length} agents
+              {selectedMode.agents.length} bounded stages
             </span>
           </div>
           <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
@@ -1604,12 +1675,12 @@ function LaunchPanel({
         <div style={{ display: 'flex', gap: 8 }}>
           <button
             onClick={onStart}
-            disabled={starting || !targetInput.trim()}
+            disabled={starting || !targetInput.trim() || !authorizationConfirmed || (intensity === 'lab' && !labTargetConfirmed)}
             className="btn btn-primary"
             style={{ flex: 1 }}
           >
             {starting ? <RefreshCw size={15} className="animate-spin" aria-hidden="true" /> : <Play size={15} aria-hidden="true" />}
-            {starting ? 'Starting…' : 'Launch Scan'}
+            {starting ? 'Starting…' : 'Start Assessment'}
           </button>
           <button onClick={onRefresh} disabled={refreshing} className="btn btn-icon" title="Refresh data" aria-label="Refresh data">
             <RefreshCw size={15} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />

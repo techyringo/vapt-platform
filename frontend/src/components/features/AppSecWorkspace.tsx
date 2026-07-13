@@ -99,8 +99,8 @@ export function AppSecWorkspace() {
       .sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
   }, [detail?.findings, query]);
 
-  const severity = detail?.summary?.severities || {};
   const cveCount = (detail?.findings || []).reduce((sum, item) => sum + item.cve_ids.length, 0);
+  const verifiedCount = (detail?.findings || []).filter(item => item.status === 'verified').length;
   const running = detail && ['queued', 'running'].includes(detail.status);
 
   return (
@@ -109,12 +109,12 @@ export function AppSecWorkspace() {
         <div>
           <div className="appsec-eyebrow"><ShieldCheck size={13} /> Unified application security</div>
           <h2>Trace risk from source to runtime</h2>
-          <p>Run evidence-producing code, dependency, IaC and secret analysis. Runtime DAST remains in Assessments; the next correlation layer will link both surfaces by application and evidence.</p>
+          <p>Assess source code, dependencies, infrastructure configuration and secret exposure with reproducible scanner evidence. Candidate observations stay separate from verified customer findings.</p>
         </div>
         <div className="appsec-principle">
           <span>Evidence policy</span>
           <strong>Candidate until verified</strong>
-          <small>Unavailable scanners remain visible as coverage gaps.</small>
+          <small>Only completed evidence-producing checks contribute to assessment coverage.</small>
         </div>
       </section>
 
@@ -189,8 +189,8 @@ export function AppSecWorkspace() {
               </header>
 
               <div className="appsec-metrics">
-                <Metric label="Total candidates" value={detail.summary?.total || 0} />
-                <Metric label="Critical / high" value={(severity.critical || 0) + (severity.high || 0)} tone="danger" />
+                <Metric label="Security observations" value={detail.summary?.total || 0} />
+                <Metric label="Verified findings" value={verifiedCount} tone="danger" />
                 <Metric label="Known CVEs" value={cveCount} tone="amber" />
                 <Metric label="Coverage lanes" value={`${Object.values(detail.coverage || {}).filter(item => item.status === 'completed').length}/3`} tone="cyan" />
               </div>
@@ -202,7 +202,7 @@ export function AppSecWorkspace() {
                   return (
                     <article className={`appsec-lane ${statusTone(state.status)}`} key={key}>
                       <div className="appsec-lane-icon"><Icon size={17} /></div>
-                      <div><strong>{meta.label}</strong><span>{meta.description}</span><small>{state.tool} · {state.findings || 0} candidates</small></div>
+                      <div><strong>{meta.label}</strong><span>{meta.description}</span><small>{state.tool} · {state.findings || 0} observations{state.verification ? ` · ${state.verification}` : ''}</small></div>
                       <LaneStatus status={state.status} />
                     </article>
                   );

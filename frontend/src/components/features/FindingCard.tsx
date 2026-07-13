@@ -91,6 +91,9 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
                 Quarantined
               </span>
             )}
+            <span className={`badge ${finding.status === 'confirmed' ? 'badge-completed' : 'badge-running'}`}>
+              {finding.status === 'confirmed' ? 'verified' : finding.status || 'candidate'}
+            </span>
           </div>
           <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11 }}>
             <span style={{ fontFamily: 'var(--font-jetbrains), monospace', color: 'var(--text-muted)' }}>
@@ -142,6 +145,35 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
                   }}>
                     {finding.evidence}
                   </pre>
+                </div>
+              )}
+
+              {(finding.request_proof || finding.response_proof) && (
+                <div>
+                  <div className="section-label" style={{ marginBottom: 6 }}>Replay Proof</div>
+                  <div className="finding-proof-grid">
+                    {finding.request_proof && (
+                      <div>
+                        <span>Sanitised request</span>
+                        <pre>{finding.request_proof}</pre>
+                      </div>
+                    )}
+                    {finding.response_proof && (
+                      <div>
+                        <span>Bounded response evidence</span>
+                        <pre>{finding.response_proof}</pre>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {finding.poc_steps && finding.poc_steps.length > 0 && (
+                <div>
+                  <div className="section-label" style={{ marginBottom: 6 }}>Reproduce Safely</div>
+                  <ol className="finding-poc-steps">
+                    {finding.poc_steps.map((step, index) => <li key={`${index}-${step}`}>{step}</li>)}
+                  </ol>
                 </div>
               )}
 

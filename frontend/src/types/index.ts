@@ -35,6 +35,8 @@ export interface Finding {
   target_display?: string;
   evidence: string;
   request_proof?: string;
+  response_proof?: string;
+  poc_steps?: string[];
   remediation: string;
   references: string[];
   cve_ids: string[];
@@ -126,7 +128,7 @@ export interface NVDStats {
 }
 
 export interface SSEEvent {
-  type: 'scan_started' | 'phase_change' | 'finding' | 'agent_status' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
+  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'agent_status' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
   scan_id: string;
   timestamp: string;
   [key: string]: any;
@@ -239,6 +241,8 @@ export interface AppSecCoverageLane {
   tool: string;
   findings?: number;
   error?: string;
+  verification?: 'active' | 'classification-only' | string;
+  detectors?: Record<string, string>;
 }
 
 export interface AppSecFinding {

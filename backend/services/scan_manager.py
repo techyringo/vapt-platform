@@ -33,6 +33,7 @@ from core.models import (
 from core.asset_graph import AssetGraphBuilder, summarize_assets
 from core.config import AppConfig
 from core.display import display_port, display_target, display_url, redact_display_text
+from core.engagement_policy import engagement_limits
 from core.quality import enrich_finding_quality
 from core.adaptive_planner import AdaptivePlanner
 from core.attack_chain import compile_attack_chains
@@ -99,6 +100,7 @@ class ScanManager:
         self._nvd = NVDService()
         self._scan_id_counter = 0
         self._orchestrators: dict[str, Any] = {}    # scan_id -> orchestrator instance
+        self._persisted_task_runs: set[tuple[str, str]] = set()
         self._live_log_task: Optional[asyncio.Task] = None  # live tool-log relay
         self._store = PersistenceStore(config.database.url)
         self._adaptive_planner = AdaptivePlanner(config)
@@ -759,6 +761,9 @@ class ScanManager:
         statuses = self._agent_status.get(scan_id, {})
         changed: set[str] = set()
         for task in result.agent_tasks:
+            task_key = (scan_id, str(task.id))
+            if task_key in self._persisted_task_runs:
+                continue
             agent_key = task.agent_type.value
             status = statuses.get(agent_key)
             if not status or not isinstance(task.result, dict):
@@ -783,6 +788,7 @@ class ScanManager:
                     changed.add(agent_key)
             if runs_to_store:
                 self._store.append_tool_runs(scan_id, agent_key, runs_to_store)
+            self._persisted_task_runs.add(task_key)
         for agent_key in changed:
             self._store.upsert_agent_status(scan_id, agent_key, statuses[agent_key])
 
@@ -1032,6 +1038,7 @@ class ScanManager:
         # Merge caller-supplied session/auth presets (P1 authenticated scans)
         # into the scope so crawlers and safe modules reach protected surfaces.
         overrides = scope_config or {}
+        execution_policy = engagement_limits(overrides)
         def _as_list(value: Any) -> list[str]:
             if value is None:
                 return []
@@ -1053,19 +1060,17 @@ class ScanManager:
             authorized_domains=authorized_domains,
             authorized_ips=authorized_ips,
             out_of_scope=_as_list(overrides.get("out_of_scope")),
-            max_depth=int(overrides.get("max_depth") or ScopeConfig().max_depth),
-            max_pages=int(overrides.get("max_pages") or ScopeConfig().max_pages),
-            max_requests_total=int(overrides.get("max_requests_total") or ScopeConfig().max_requests_total),
+            max_depth=execution_policy["max_depth"],
+            max_pages=execution_policy["max_pages"],
+            max_requests_total=execution_policy["max_requests_total"],
             exclude_paths=_as_list(overrides.get("exclude_paths")),
             include_paths=_as_list(overrides.get("include_paths")) or None,
-            rate_limit=self._config.rate_limiting.requests_per_second,
+            rate_limit=execution_policy["rate_limit"],
             auth_token=overrides.get("auth_token") or None,
             auth_type=auth_type or ("bearer" if overrides.get("auth_token") else None),
             custom_headers=overrides.get("custom_headers") or {},
             cookies=overrides.get("cookies") or {},
         )
-        if overrides.get("rate_limit"):
-            scope_cfg.rate_limit = int(overrides["rate_limit"])
         scope = ScopeManager(scope_cfg)
         scope_summary = scope.get_scope_summary()
         scope_summary["execution_targets"] = execution_targets
@@ -1085,6 +1090,9 @@ class ScanManager:
             "max_requests_total": scope_cfg.max_requests_total,
             "exclude_paths": scope_cfg.exclude_paths,
             "include_paths": scope_cfg.include_paths or [],
+            "intensity": execution_policy["intensity"],
+            "authorization_confirmed": True,
+            "lab_target_confirmed": execution_policy["lab_target_confirmed"],
             "emergency_stop": f"/api/scans/{scan_id}/stop",
         }
         artifact_payload = json.dumps(rules_of_engagement, sort_keys=True, default=str)
@@ -1202,6 +1210,33 @@ class ScanManager:
             asyncio.create_task(self._record_adaptive_decision(scan_id, phase))
 
         orchestrator.on_phase_change(on_phase_change)
+
+        # Persist the attack surface after every phase rather than waiting for
+        # the final report. This gives reconnecting clients a durable live view
+        # of body-verified URLs, technologies, endpoints, parameters and
+        # services while the assessment is still running.
+        def on_phase_complete(phase: str, phase_result: ScanResult):
+            self._ingest_scan_result_assets(scan_id, phase_result)
+            self._ingest_task_tool_runs(scan_id, phase_result)
+            graph = self.get_asset_graph(scan_id)
+            phase_context: dict[str, Any] = {}
+            for task in reversed(phase_result.agent_tasks):
+                if task.phase.value == phase and isinstance(task.result, dict):
+                    phase_context = task.result
+                    break
+            asyncio.create_task(self._broadcast(ScanEvent(
+                event_type="phase_complete",
+                scan_id=scan_id,
+                data={
+                    "phase": phase,
+                    "asset_summary": graph.get("summary", {}),
+                    "total_assets": graph.get("total_assets", 0),
+                    "target_health": phase_context.get("target_health", {}),
+                    "message": f"{phase.replace('_', ' ').title()} evidence persisted",
+                },
+            )))
+
+        orchestrator.on_phase_complete(on_phase_complete)
 
         # Agent status callback
         def on_agent_start(agent_type: str, tool_name: str = ""):
@@ -1406,6 +1441,9 @@ class ScanManager:
         self._findings.pop(scan_id, None)
         self._agent_status.pop(scan_id, None)
         self._orchestrators.pop(scan_id, None)
+        self._persisted_task_runs = {
+            key for key in self._persisted_task_runs if key[0] != scan_id
+        }
         self._event_history = [
             event for event in self._event_history
             if event.get("scan_id") != scan_id

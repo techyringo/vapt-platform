@@ -319,29 +319,10 @@ class FuzzingAgent(BaseAgent):
                 )
                 self._add_finding(finding)
 
-        # Check for admin panels
-        admin_hits = [r for r in results if any(kw in r.get("url", "").lower() for kw in ["admin", "wp-admin", "phpmyadmin", "manager", "console", "dashboard"])]
-        if admin_hits:
-            for a in admin_hits[:5]:
-                url = a.get("url", "")
-                finding = Finding(
-                    title=f"Admin Panel Discovered: {url}",
-                    description=f"An administration interface was discovered at {url}. "
-                                f"Admin panels are high-value targets for brute-force attacks "
-                                f"and should be protected with strong authentication, MFA, "
-                                f"and IP-based access restrictions.",
-                    severity=Severity.MEDIUM,
-                    agent_source=AgentType.FUZZER,
-                    target=Target(host=target.host, url=url),
-                    evidence=f"HTTP {a.get('status', 'N/A')} — Length: {a.get('length', 'N/A')}",
-                    remediation="Protect admin interfaces with: IP whitelisting, MFA, rate limiting, "
-                                "account lockout policies, and CAPTCHA. Consider moving admin to a "
-                                "non-standard URL.",
-                    tags=["admin-panel", "brute-force", "authentication"],
-                    confidence="high",
-                    status="confirmed",
-                )
-                self._add_finding(finding)
+        # Administration routes are attack-surface inventory, not proof of a
+        # vulnerability. They remain in ``new_endpoints`` for targeted auth
+        # testing and the live surface view, but are never promoted merely
+        # because a path contains "admin" or "dashboard".
 
     async def _llm_analyze_fuzz_results(self, endpoints: list[dict], technologies: dict, target: Target) -> None:
         """Use LLM to analyze fuzzing results and identify patterns that automated rules miss.
