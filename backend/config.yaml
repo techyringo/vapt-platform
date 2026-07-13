@@ -285,6 +285,22 @@ tools:
     docker_image: "zricethezav/gitleaks:latest"
     timeout: 600
 
+  # Application security vertical slice. These approved images are pulled on
+  # first use and their exact runtime metadata is recorded with the assessment.
+  semgrep:
+    enabled: true
+    docker_image: "semgrep/semgrep:latest"
+    timeout: 900
+    memory_limit: "2048m"
+    cpu_limit: 2.0
+
+  trivy:
+    enabled: true
+    docker_image: "aquasec/trivy:latest"
+    timeout: 900
+    memory_limit: "1536m"
+    cpu_limit: 1.5
+
   # Misc
   waybackurls:
     enabled: true

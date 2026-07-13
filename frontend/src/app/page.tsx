@@ -59,9 +59,10 @@ import { FindingCard, SEV_BADGE_CLASS } from '@/components/features/FindingCard'
 import { AgentCard } from '@/components/features/AgentCard';
 import { LiveFeed, type LogMessage } from '@/components/features/LiveFeed';
 import { LLMConfigPanel } from '@/components/features/LLMConfigPanel';
+import { AppSecWorkspace } from '@/components/features/AppSecWorkspace';
 
 /* ─── Types ─────────────────────────────────────────────── */
-type Tab = 'dashboard' | 'findings' | 'agents' | 'tools' | 'config';
+type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
 type SeverityFilter = SeverityKey | 'all';
 const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
 
@@ -1456,6 +1457,8 @@ export default function Dashboard() {
               )}
             </section>
           )}
+
+          {activeTab === 'appsec' && <AppSecWorkspace />}
 
           {/* ── CONFIG TAB ─────────────────────────────────── */}
           {activeTab === 'config' && (

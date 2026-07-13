@@ -1,11 +1,12 @@
 'use client';
 
-import { Bot, LayoutDashboard, Settings, ShieldAlert, Wrench } from 'lucide-react';
+import { Bot, Code2, LayoutDashboard, Settings, ShieldAlert, Wrench } from 'lucide-react';
 
-type Tab = 'dashboard' | 'findings' | 'agents' | 'tools' | 'config';
+type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
 
 const TABS = [
   { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Dash' },
+  { tab: 'appsec'    as Tab, icon: Code2,          label: 'Code' },
   { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Finds' },
   { tab: 'agents'    as Tab, icon: Bot,             label: 'Agents' },
   { tab: 'tools'     as Tab, icon: Wrench,          label: 'Exec' },

@@ -27,7 +27,7 @@ configure_runtime_logging()
 
 from arq.connections import RedisSettings
 
-from worker.jobs import execute_tool, ping_worker, pull_tool_images
+from worker.jobs import execute_tool, ping_worker, pull_tool_images, run_appsec_assessment
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 ARQ_QUEUE_NAME = os.environ.get("VAPT_ARQ_QUEUE", "vapt:tools")
@@ -103,7 +103,7 @@ async def shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """ARQ worker configuration."""
 
-    functions = [ping_worker, execute_tool, pull_tool_images]
+    functions = [ping_worker, execute_tool, pull_tool_images, run_appsec_assessment]
 
     redis_settings = _hardened_redis_settings()
 

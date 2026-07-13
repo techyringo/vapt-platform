@@ -234,6 +234,61 @@ export interface ScanCoverage {
   checks: CoverageCheck[];
 }
 
+export interface AppSecCoverageLane {
+  status: 'planned' | 'running' | 'completed' | 'unavailable' | 'failed';
+  tool: string;
+  findings?: number;
+  error?: string;
+}
+
+export interface AppSecFinding {
+  id: number;
+  fingerprint: string;
+  source: string;
+  category: 'sast' | 'sca' | 'iac' | 'secret' | string;
+  rule_id: string;
+  title: string;
+  description: string;
+  severity: SeverityKey;
+  confidence: string;
+  status: string;
+  repository: string;
+  path: string;
+  start_line?: number;
+  end_line?: number;
+  package?: string;
+  installed_version?: string;
+  fixed_version?: string;
+  cve_ids: string[];
+  cwe_ids: string[];
+  references: string[];
+  evidence: string;
+  remediation: string;
+}
+
+export interface AppSecAssessment {
+  assessment_id: string;
+  name: string;
+  repository: string;
+  ref: string;
+  commit_sha: string;
+  status: 'queued' | 'running' | 'partial' | 'completed' | 'failed';
+  phase: string;
+  progress: number;
+  coverage: Record<string, AppSecCoverageLane>;
+  summary: {
+    total?: number;
+    severities?: Partial<Record<SeverityKey, number>>;
+    categories?: Record<string, number>;
+    unavailable?: string[];
+  };
+  error?: string;
+  created_at: string;
+  updated_at: string;
+  findings?: AppSecFinding[];
+  tool_runs?: Array<Record<string, unknown>>;
+}
+
 export interface LLMFallbackProvider {
   provider: string;
   model: string;
