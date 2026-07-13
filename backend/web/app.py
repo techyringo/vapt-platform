@@ -1419,6 +1419,23 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 tool["missing_credentials_count"] = availability.get("missing_credentials_count", 0)
         return plan
 
+    @app.get("/api/scans/{scan_id}/decisions")
+    async def get_agent_decisions(scan_id: str, limit: int = 100):
+        """Return the auditable planner ledger, including deterministic fallback."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        decisions = mgr.get_decisions(scan_id, limit=limit)
+        return {"scan_id": scan_id, "total": len(decisions), "decisions": decisions}
+
+    @app.get("/api/scans/{scan_id}/attack-chains")
+    async def get_attack_chains(scan_id: str):
+        """Return verified and hypothesized chains with per-edge evidence refs."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return mgr.get_attack_chains(scan_id)
+
     @app.get("/api/scans/{scan_id}/agents")
     async def get_agent_status(scan_id: str):
         """Get real-time agent status for a scan (drives the Agent Roster panel)."""

@@ -121,7 +121,9 @@ class IntelAgent(BaseAgent):
         except Exception:
             pass
 
-        # Phase 4: attack-chain detection across existing findings (unchanged)
+        # Phase 4: attack chains are compiled centrally after evidence grading.
+        # Intel must not create a Critical finding merely because two findings
+        # share a URL; /attack-chains exposes verified paths and hypotheses.
         self._enrich_findings(all_findings_so_far, task.target)
 
         task.result = {
@@ -523,33 +525,8 @@ class IntelAgent(BaseAgent):
             logger.warning("[INTEL] LLM analysis failed: {err}", err=exc)
 
     def _enrich_findings(self, existing_findings: list, target: Target) -> None:
-        """Enrich existing findings with additional context."""
-        # Group findings by target URL
-        url_findings: dict[str, list] = {}
-        for f in existing_findings:
-            url = f.target.url or f.target.base_url
-            url_findings.setdefault(url, []).append(f)
-
-        # Check for potential attack chains
-        for url, findings in url_findings.items():
-            severities = [f.severity for f in findings]
-            if Severity.HIGH in severities or Severity.CRITICAL in severities:
-                if len(findings) >= 2:
-                    chain_finding = Finding(
-                        title=f"Potential Attack Chain on {url}",
-                        description=f"Multiple vulnerabilities found on the same endpoint ({url}), which could "
-                                    f"potentially be chained together for greater impact:\n\n"
-                                    + "\n".join(f"  - [{f.severity.value}] {f.title}" for f in findings)
-                                    + "\n\nAn attacker could combine these vulnerabilities to escalate privileges, "
-                                    "access sensitive data, or achieve remote code execution.",
-                        severity=Severity.CRITICAL,
-                        cvss_score=9.5,
-                        agent_source=AgentType.INTEL,
-                        target=target,
-                        evidence=f"{len(findings)} vulnerabilities on single endpoint: {url}",
-                        remediation="Prioritize patching all vulnerabilities on this endpoint. "
-                                    "Consider the combined attack surface when planning remediation.",
-                        tags=["attack-chain", "chaining", "escalation"],
-                        confidence="medium",
-                    )
-                    self._add_finding(chain_finding)
+        """Deprecated compatibility hook; chain compilation is centralized."""
+        logger.debug(
+            "[INTEL] Deferred attack-chain compilation for {count} finding(s)",
+            count=len(existing_findings),
+        )

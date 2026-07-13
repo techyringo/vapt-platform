@@ -45,6 +45,7 @@ from core.llm_budget import budget_prompt
 
 _GLOBAL_RATE_WINDOWS: dict[str, list[float]] = {}
 _GLOBAL_RATE_LOCK = threading.Lock()
+_GLOBAL_PROVIDER_COOLDOWNS: dict[str, tuple[float, str]] = {}
 
 
 def _bearer_token(value: str) -> str:
@@ -457,6 +458,12 @@ class LLMClient:
 
             # Check rate limit
             rate_key = f"{pc.provider.value}:{pc.base_url.rstrip('/') or pc.provider.value}"
+            cooldown = _GLOBAL_PROVIDER_COOLDOWNS.get(rate_key)
+            if cooldown and cooldown[0] > time.time():
+                last_error = f"Provider circuit open: {cooldown[1]}"
+                continue
+            if cooldown:
+                _GLOBAL_PROVIDER_COOLDOWNS.pop(rate_key, None)
             if not self._reserve_rate_limit(rate_key, pc.max_rpm):
                 last_error = f"Rate limit reached for {prov_name} ({pc.max_rpm} requests/minute)"
                 continue
@@ -500,6 +507,11 @@ class LLMClient:
                     return response
                 else:
                     last_error = response.error if response and response.error else "Empty response"
+                    error_lower = str(last_error).lower()
+                    if "http 401" in error_lower or "http 403" in error_lower:
+                        _GLOBAL_PROVIDER_COOLDOWNS[rate_key] = (time.time() + 300, str(last_error)[:300])
+                    elif "http 429" in error_lower or "rate limit" in error_lower:
+                        _GLOBAL_PROVIDER_COOLDOWNS[rate_key] = (time.time() + 60, str(last_error)[:300])
                     logger.warning(
                         "LLM call failed provider={provider} model={model}: {error}",
                         provider=pc.provider.value,

@@ -2,7 +2,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.llm_client import LLMClient, LLMResponse, _GLOBAL_RATE_WINDOWS, _bearer_token
+from tools.llm_client import (
+    LLMClient, LLMResponse, _GLOBAL_PROVIDER_COOLDOWNS, _GLOBAL_RATE_WINDOWS,
+    _bearer_token,
+)
 
 
 def _config():
@@ -44,6 +47,24 @@ def test_rate_limit_is_shared_and_reserves_failed_attempts():
     assert first._reserve_rate_limit(key, 2) is True
     assert second._reserve_rate_limit(key, 2) is True
     assert first._reserve_rate_limit(key, 2) is False
+
+
+@pytest.mark.asyncio
+async def test_auth_failure_opens_shared_provider_circuit(monkeypatch):
+    monkeypatch.setattr("core.runtime_config.apply_runtime_llm_overlay", lambda config: config)
+    _GLOBAL_PROVIDER_COOLDOWNS.clear()
+    client = LLMClient(_config())
+    calls = 0
+
+    async def unauthorized(**kwargs):
+        nonlocal calls
+        calls += 1
+        return LLMResponse(content="", provider="openai_compat", model="m", error="HTTP 401: Unauthorized")
+
+    client._call_provider = unauthorized
+    await client.complete("first auth failure", use_fallback=False)
+    await client.complete("second call is blocked", use_fallback=False)
+    assert calls == 1
 
 
 @pytest.mark.asyncio

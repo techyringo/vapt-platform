@@ -183,6 +183,35 @@ export interface AttackSurfacePlan {
   planned_capabilities: AttackSurfacePlanItem[];
 }
 
+export interface AgentDecision {
+  decision_id: string;
+  phase: string;
+  status: string;
+  created_at: string;
+  input_evidence: string[];
+  selected: Array<{ tool: string; capability: string; reason: string; consumes: string[]; produces: string[] }>;
+  hypotheses: string[];
+  coverage_gaps: string[];
+  model_trace: { used: boolean; provider: string; model: string; error: string };
+}
+
+export interface AttackChain {
+  chain_id: string;
+  name: string;
+  target_host: string;
+  status: 'verified' | 'hypothesis';
+  confidence: string;
+  impact: string;
+  nodes: Array<{ evidence_ref: string; title: string; severity: string; role: string }>;
+  edges: Array<{ source: string; target: string; relation: string; evidence_refs: string[] }>;
+}
+
+export interface AttackChainResult {
+  scan_id: string;
+  summary: { total: number; verified: number; hypotheses: number };
+  chains: AttackChain[];
+}
+
 export interface CoverageCheck {
   id: string;
   label: string;

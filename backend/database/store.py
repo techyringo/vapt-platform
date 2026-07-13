@@ -727,6 +727,26 @@ class PersistenceStore:
             ).fetchall()
         return [_json_load(row["payload_json"], {}) for row in reversed(rows)]
 
+    def load_events(
+        self,
+        scan_id: str,
+        *,
+        event_type: str | None = None,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Load a durable per-scan event slice for replay/audit APIs."""
+        limit = max(1, min(limit, 2000))
+        query = "SELECT payload_json FROM events WHERE scan_id = ?"
+        params: list[Any] = [scan_id]
+        if event_type:
+            query += " AND event_type = ?"
+            params.append(event_type)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [_json_load(row["payload_json"], {}) for row in reversed(rows)]
+
     def upsert_asset(self, scan_id: str, asset: dict[str, Any]) -> None:
         now = _utc_now()
         metadata = asset.get("metadata", {})

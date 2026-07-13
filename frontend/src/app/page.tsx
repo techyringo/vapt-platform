@@ -35,7 +35,7 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentStatus, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentDecision, AgentStatus, AttackChainResult, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -194,6 +194,8 @@ export default function Dashboard() {
 	  const [agentStatus,    setAgentStatus]    = useState<Record<string, AgentStatus>>({});
 	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
 	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
+  const [decisions,      setDecisions]      = useState<AgentDecision[]>([]);
+  const [attackChains,   setAttackChains]   = useState<AttackChainResult | null>(null);
   const [modes,          setModes]          = useState<ScanMode[]>([]);
   const [nvdStats,       setNvdStats]       = useState<NVDStats | null>(null);
   const [toolsStatus,    setToolsStatus]    = useState<Record<string, any>>({});
@@ -404,17 +406,23 @@ export default function Dashboard() {
 	    setAgentStatus({});
 	    setToolRuns([]);
 	    setCoverage(null);
+	    setDecisions([]);
+	    setAttackChains(null);
 	    setLoadingFindings(true);
 	    Promise.allSettled([
 	      api.getFindings(selectedScan.scan_id),
 	      api.getAgentStatus(selectedScan.scan_id),
 	      api.getToolRuns(selectedScan.scan_id),
 	      api.getCoverage(selectedScan.scan_id),
-	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes]) => {
+	      api.getDecisions(selectedScan.scan_id),
+	      api.getAttackChains(selectedScan.scan_id),
+	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
 	      if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value.findings);
 	      if (agentRes.status === 'fulfilled')    setAgentStatus(agentRes.value.agents);
 	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
 	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	      if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
+	      if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	    }).finally(() => setLoadingFindings(false));
   }, [selectedScan?.scan_id]);
 
@@ -439,9 +447,13 @@ export default function Dashboard() {
 	      Promise.allSettled([
 	        api.getToolRuns(selectedScan.scan_id),
 	        api.getCoverage(selectedScan.scan_id),
-	      ]).then(([toolRunRes, coverageRes]) => {
+	        api.getDecisions(selectedScan.scan_id),
+	        api.getAttackChains(selectedScan.scan_id),
+	      ]).then(([toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
 	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
 	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	        if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
+	        if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	      })
 	        .catch(() => {});
 	    };
@@ -1167,6 +1179,73 @@ export default function Dashboard() {
 	                      <AgentCard key={name} name={name} status={status} index={index} />
 	                    ))}
 	                  </div>
+
+                    <div className="card-glass" style={{ padding: 14 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                        <div>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Agent Decision Ledger</h3>
+                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                            {decisions.length} auditable phase decision{decisions.length === 1 ? '' : 's'} · model failure falls back to policy
+                          </p>
+                        </div>
+                        <span className="badge badge-informational">bounded agency</span>
+                      </div>
+                      {decisions.length === 0 ? (
+                        <div className="quiet-empty">Decisions appear as each scan phase begins.</div>
+                      ) : (
+                        <div className="coverage-list">
+                          {[...decisions].reverse().slice(0, 6).map(decision => (
+                            <div key={decision.decision_id} className="coverage-row">
+                              <div style={{ minWidth: 0 }}>
+                                <div className="coverage-title">{formatPhase(decision.phase)}</div>
+                                <div className="coverage-meta">
+                                  {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
+                                  {decision.coverage_gaps?.length ? ` · ${decision.coverage_gaps.length} gap(s)` : ''}
+                                </div>
+                              </div>
+                              <span className={`badge ${decision.model_trace?.used ? 'badge-completed' : 'badge-idle'}`}>
+                                {decision.model_trace?.used ? 'AI ranked' : 'policy fallback'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {attackChains && (
+                      <div className="card-glass" style={{ padding: 14 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                          <div>
+                            <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Evidence-backed Attack Paths</h3>
+                            <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                              {attackChains.summary.verified} verified · {attackChains.summary.hypotheses} hypotheses
+                            </p>
+                          </div>
+                          <span className={`badge ${attackChains.summary.verified ? 'badge-failed' : 'badge-idle'}`}>
+                            {attackChains.summary.total} path{attackChains.summary.total === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                        {attackChains.chains.length === 0 ? (
+                          <div className="quiet-empty">No compatible evidence chain has been established.</div>
+                        ) : (
+                          <div className="coverage-list">
+                            {attackChains.chains.slice(0, 8).map(chain => (
+                              <div key={chain.chain_id} className="coverage-row">
+                                <div style={{ minWidth: 0 }}>
+                                  <div className="coverage-title">{chain.name}</div>
+                                  <div className="coverage-meta">
+                                    {chain.nodes.map(node => node.title).join(' → ')} · evidence {chain.edges[0]?.evidence_refs.join(', ')}
+                                  </div>
+                                </div>
+                                <span className={`badge ${chain.status === 'verified' ? 'badge-failed' : 'badge-running'}`}>
+                                  {chain.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
 
 	                  {coverage && (
 	                    <div className="card-glass" style={{ padding: 14 }}>
