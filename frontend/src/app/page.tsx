@@ -1183,12 +1183,12 @@ export default function Dashboard() {
                     <div className="card-glass" style={{ padding: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
                         <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Agent Decision Ledger</h3>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Scan Strategy</h3>
                           <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            {decisions.length} auditable phase decision{decisions.length === 1 ? '' : 's'} · model failure falls back to policy
+                            Capabilities selected from live scan evidence for each assessment phase
                           </p>
                         </div>
-                        <span className="badge badge-informational">bounded agency</span>
+                        <span className="badge badge-informational">{decisions.length} phase{decisions.length === 1 ? '' : 's'}</span>
                       </div>
                       {decisions.length === 0 ? (
                         <div className="quiet-empty">Decisions appear as each scan phase begins.</div>
@@ -1200,12 +1200,9 @@ export default function Dashboard() {
                                 <div className="coverage-title">{formatPhase(decision.phase)}</div>
                                 <div className="coverage-meta">
                                   {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
-                                  {decision.coverage_gaps?.length ? ` · ${decision.coverage_gaps.length} gap(s)` : ''}
                                 </div>
                               </div>
-                              <span className={`badge ${decision.model_trace?.used ? 'badge-completed' : 'badge-idle'}`}>
-                                {decision.model_trace?.used ? 'AI ranked' : 'policy fallback'}
-                              </span>
+                              <span className="badge badge-completed">planned</span>
                             </div>
                           ))}
                         </div>
@@ -1234,7 +1231,7 @@ export default function Dashboard() {
                                 <div style={{ minWidth: 0 }}>
                                   <div className="coverage-title">{chain.name}</div>
                                   <div className="coverage-meta">
-                                    {chain.nodes.map(node => node.title).join(' → ')} · evidence {chain.edges[0]?.evidence_refs.join(', ')}
+                                    {chain.nodes.map(node => node.title).join(' → ')}
                                   </div>
                                 </div>
                                 <span className={`badge ${chain.status === 'verified' ? 'badge-failed' : 'badge-running'}`}>

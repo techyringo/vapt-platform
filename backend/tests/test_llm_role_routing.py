@@ -8,6 +8,16 @@ from tools.llm_client import (
 )
 
 
+@pytest.fixture(autouse=True)
+def reset_process_wide_llm_state():
+    """Keep shared limiter/circuit state from leaking between unit tests."""
+    _GLOBAL_RATE_WINDOWS.clear()
+    _GLOBAL_PROVIDER_COOLDOWNS.clear()
+    yield
+    _GLOBAL_RATE_WINDOWS.clear()
+    _GLOBAL_PROVIDER_COOLDOWNS.clear()
+
+
 def _config():
     llm = SimpleNamespace(
         provider="openai_compat",
@@ -40,7 +50,6 @@ def test_bearer_token_accepts_raw_or_prefixed_keys():
 
 
 def test_rate_limit_is_shared_and_reserves_failed_attempts():
-    _GLOBAL_RATE_WINDOWS.clear()
     first = LLMClient(_config())
     second = LLMClient(_config())
     key = "openai_compat:https://integrate.api.nvidia.com"
@@ -52,7 +61,6 @@ def test_rate_limit_is_shared_and_reserves_failed_attempts():
 @pytest.mark.asyncio
 async def test_auth_failure_opens_shared_provider_circuit(monkeypatch):
     monkeypatch.setattr("core.runtime_config.apply_runtime_llm_overlay", lambda config: config)
-    _GLOBAL_PROVIDER_COOLDOWNS.clear()
     client = LLMClient(_config())
     calls = 0
 
