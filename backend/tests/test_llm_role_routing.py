@@ -4,7 +4,7 @@ import pytest
 
 from tools.llm_client import (
     LLMClient, LLMResponse, _GLOBAL_PROVIDER_COOLDOWNS, _GLOBAL_RATE_WINDOWS,
-    _bearer_token,
+    _bearer_token, _redact_llm_text,
 )
 
 
@@ -47,6 +47,16 @@ def _config():
 def test_bearer_token_accepts_raw_or_prefixed_keys():
     assert _bearer_token(" nvapi-test ") == "nvapi-test"
     assert _bearer_token("Bearer nvapi-test") == "nvapi-test"
+
+
+def test_llm_audit_preview_redacts_credentials_and_log_lines():
+    preview = _redact_llm_text(
+        "Authorization: Bearer secret\nCookie: session=abc\napi_key=nvapi-private"
+    )
+    assert "secret" not in preview
+    assert "session=abc" not in preview
+    assert "nvapi-private" not in preview
+    assert "\\n" in preview
 
 
 def test_rate_limit_is_shared_and_reserves_failed_attempts():

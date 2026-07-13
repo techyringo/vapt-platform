@@ -153,13 +153,15 @@ class FuzzingAgent(BaseAgent):
             result = await self._runner.run(
                 tool_name="ffuf",
                 args=[
-                    "-u", f"{base_url}/FUZZ.EXT",
-                    "-w", f"{tmp_path}:FUZZ,{extensions}:EXT",
+                    "-u", f"{base_url}/FUZZ",
+                    "-w", f"{tmp_path}:FUZZ",
+                    "-e", ",".join(f".{item}" for item in extensions.split(",")),
                     "-fc", "404",
                     "-t", "20",
                     "-mc", "200,201,301,302,403,401",
                     "-o", "/dev/stdout",
                     "-of", "json",
+                    "-ac",
                 ],
                 timeout=600,
             )
@@ -195,17 +197,22 @@ class FuzzingAgent(BaseAgent):
 
             try:
                 import httpx as httpx_client
+                from core.http_evidence import fetch_missing_baseline, validate_api_response
                 async with httpx_client.AsyncClient(verify=False, timeout=10, follow_redirects=True) as client:
+                    baseline = await fetch_missing_baseline(client, base)
                     for version in versions:
                         url = f"{base}/{version}"
                         try:
                             resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                            if resp.status_code != 404:
+                            verdict = validate_api_response(resp, baseline)
+                            if verdict.confirmed:
                                 results.append({
                                     "url": url,
                                     "status": resp.status_code,
                                     "length": len(resp.content),
                                     "source": "api_version_fuzz",
+                                    "validation_reason": verdict.reason,
+                                    "response_proof": verdict.evidence,
                                 })
                         except Exception:
                             continue
@@ -237,20 +244,26 @@ class FuzzingAgent(BaseAgent):
         results = []
         try:
             import httpx as httpx_client
+            from core.http_evidence import fetch_missing_baseline, validate_sensitive_response
             async with httpx_client.AsyncClient(verify=False, timeout=8, follow_redirects=True) as client:
+                baseline = await fetch_missing_baseline(client, base_url)
                 for path in sensitive_paths:
                     url = f"{base_url.rstrip('/')}/{path}"
                     if not self.is_in_scope(url):
                         continue
                     try:
                         resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-                        if resp.status_code == 200 and len(resp.content) > 0:
+                        verdict = validate_sensitive_response(path, resp, baseline)
+                        if verdict.confirmed:
                             results.append({
                                 "url": url,
                                 "status": resp.status_code,
                                 "length": len(resp.content),
                                 "source": "sensitive_file_probe",
-                                "sensitive": True,
+                                "sensitive": verdict.category not in {"public_metadata", "admin_endpoint"},
+                                "category": verdict.category,
+                                "validation_reason": verdict.reason,
+                                "response_proof": verdict.evidence,
                             })
                     except Exception:
                         continue
@@ -279,7 +292,7 @@ class FuzzingAgent(BaseAgent):
         if sensitive:
             for s in sensitive[:10]:
                 url = s.get("url", "")
-                path = url.split("/")[-1] if "/" in url else url
+                path = urlparse(url).path.lstrip("/") or url
                 severity = Severity.CRITICAL if any(kw in path.lower() for kw in [".env", "credentials", "id_rsa", "service-account", "backup.sql", "database.sql", ".git"]) else Severity.HIGH
 
                 finding = Finding(
@@ -294,7 +307,10 @@ class FuzzingAgent(BaseAgent):
                         host=target.host,
                         url=url,
                     ),
-                    evidence=f"HTTP {s.get('status', 'N/A')} — Content-Length: {s.get('length', 'N/A')}",
+                    evidence=(
+                        f"{s.get('response_proof', 'HTTP response verified')}\n"
+                        f"Validation: {s.get('validation_reason', 'resource-specific body signature')}"
+                    ),
                     remediation=f"Remove the file from the web root or restrict access using server "
                                 f"configuration. Add this path to your WAF rules.",
                     tags=["sensitive-file", "exposure", "information-disclosure"],

@@ -13,6 +13,7 @@ import json
 import tempfile
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse, urljoin
@@ -310,7 +311,7 @@ class VulnScannerAgent(BaseAgent):
 
     def _prioritize_nuclei_targets(self, targets: list[str]) -> list[str]:
         """Bound broad nuclei input so it cannot stall the whole vuln phase."""
-        max_targets = int(os.environ.get("VAPT_NUCLEI_MAX_TARGETS", "24"))
+        max_targets = int(os.environ.get("VAPT_NUCLEI_MAX_TARGETS", "8"))
         roots = self._preferred_web_roots(self._web_roots(targets))
         root_set = set(roots)
         high_value_markers = (
@@ -482,7 +483,9 @@ class VulnScannerAgent(BaseAgent):
         from tools.runner import shared_temp_path
         selected_targets = self._prioritize_nuclei_targets(targets)
         batch_size = int(os.environ.get("VAPT_NUCLEI_BATCH_SIZE", "8"))
-        batch_timeout = int(os.environ.get("VAPT_NUCLEI_BATCH_TIMEOUT", "420"))
+        batch_timeout = int(os.environ.get("VAPT_NUCLEI_BATCH_TIMEOUT", "180"))
+        total_budget = int(os.environ.get("VAPT_NUCLEI_TOTAL_BUDGET", "240"))
+        started = time.monotonic()
         all_parsed: list[dict] = []
 
         nuc_config = self.config.tools.get("nuclei", AppConfig().get_tool_config("nuclei"))
@@ -509,6 +512,13 @@ class VulnScannerAgent(BaseAgent):
         )
 
         for index, batch in enumerate(batches, 1):
+            remaining = total_budget - (time.monotonic() - started)
+            if remaining <= 5:
+                logger.warning(
+                    "[VULN_SCAN] nuclei total budget exhausted after {elapsed:.1f}s; stopping broad pass",
+                    elapsed=time.monotonic() - started,
+                )
+                break
             host_path = shared_temp_path(suffix=".txt")
             with open(host_path, "w") as f:
                 f.write("\n".join(batch))
@@ -526,7 +536,7 @@ class VulnScannerAgent(BaseAgent):
                         "-rate-limit", "35",
                         "-max-host-error", "20",
                     ] + template_args + extra_args + tag_args,
-                    timeout=min(batch_timeout, self._adaptive_timeout(len(batch), 180, 20, batch_timeout)),
+                    timeout=max(5, min(int(remaining), batch_timeout, self._adaptive_timeout(len(batch), 90, 10, batch_timeout))),
                 )
                 self._record_tool_run(result, "vuln_scanning")
                 if result.stdout.strip():
@@ -544,6 +554,11 @@ class VulnScannerAgent(BaseAgent):
                         idx=index,
                         total=len(batches),
                     )
+                    # Repeating the same broad template set against another
+                    # batch after a timeout creates multi-minute cascades.
+                    # Preserve partial output and let evidence-targeted passes
+                    # continue instead.
+                    break
             finally:
                 try:
                     os.unlink(host_path)
@@ -620,6 +635,7 @@ class VulnScannerAgent(BaseAgent):
             return []
 
         import httpx as httpx_client
+        from core.http_evidence import fetch_missing_baseline
 
         validated: list[dict] = []
         async with httpx_client.AsyncClient(
@@ -628,11 +644,15 @@ class VulnScannerAgent(BaseAgent):
             follow_redirects=False,
             headers={"User-Agent": "Mozilla/5.0"},
         ) as client:
+            baselines: dict[str, Any] = {}
             for item in nikto_findings:
                 finding_text = str(item.get("finding") or "")
                 lower = finding_text.lower()
                 if self._nikto_requires_replay(lower):
-                    proof = await self._replay_nikto_path(client, item)
+                    target_url = str(item.get("target_url") or "")
+                    if target_url not in baselines:
+                        baselines[target_url] = await fetch_missing_baseline(client, target_url)
+                    proof = await self._replay_nikto_path(client, item, baselines[target_url])
                     if not proof:
                         logger.info(
                             "[VULN_SCAN] Dropping weak Nikto hint without replay proof: {finding}",
@@ -662,7 +682,9 @@ class VulnScannerAgent(BaseAgent):
             "config file",
         ))
 
-    async def _replay_nikto_path(self, client: Any, item: dict) -> dict[str, Any] | None:
+    async def _replay_nikto_path(
+        self, client: Any, item: dict, baseline: Any = None
+    ) -> dict[str, Any] | None:
         raw = str(item.get("finding") or item.get("raw") or "")
         target_url = str(item.get("target_url") or "")
         if not target_url:
@@ -680,6 +702,12 @@ class VulnScannerAgent(BaseAgent):
             logger.debug("[VULN_SCAN] Nikto replay failed for {url}: {err}", url=url, err=exc)
             return None
         if response.status_code not in {200, 206}:
+            return None
+
+        from core.http_evidence import equivalent_to_baseline, fingerprint_response
+        candidate_fingerprint = fingerprint_response(response)
+        if equivalent_to_baseline(candidate_fingerprint, baseline):
+            logger.info("[VULN_SCAN] Dropping Nikto soft-404/SPA fallback: {url}", url=url)
             return None
 
         body = response.text[:80_000]

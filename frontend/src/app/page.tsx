@@ -100,8 +100,16 @@ function formatPhase(phase?: string) {
 }
 
 function scanTime(scan: Scan) {
-  const parsed = Date.parse(scan.start_time || '');
+  const parsed = parseBackendTime(scan.start_time);
   return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function parseBackendTime(value?: string) {
+  if (!value) return Number.NaN;
+  // Backend timestamps are UTC. Python's isoformat() may omit the trailing Z;
+  // browsers otherwise interpret the value as local time (5.5h wrong in IST).
+  const explicitZone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(value);
+  return Date.parse(explicitZone ? value : `${value}Z`);
 }
 
 function orderScans(scanList: Scan[]) {
@@ -137,7 +145,7 @@ function riskPosture(counts: Record<SeverityKey, number>) {
 
 function formatAge(value?: string) {
   if (!value) return 'not started';
-  const ms = Date.now() - new Date(value).getTime();
+  const ms = Date.now() - parseBackendTime(value);
   if (!Number.isFinite(ms) || ms < 0) return 'just now';
   const min = Math.floor(ms / 60000);
   if (min < 1)  return 'just now';
@@ -145,6 +153,19 @@ function formatAge(value?: string) {
   const hr = Math.floor(min / 60);
   if (hr < 24)  return `${hr}h ago`;
   return `${Math.floor(hr / 24)}d ago`;
+}
+
+function formatElapsed(scan: Scan, now: number) {
+  const started = parseBackendTime(scan.start_time);
+  const seconds = scan.status === 'running' && Number.isFinite(started)
+    ? Math.max(0, Math.floor((now - started) / 1000))
+    : Math.max(0, Math.floor(scan.duration_seconds || 0));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours > 0
+    ? `${hours}h ${String(minutes).padStart(2, '0')}m ${String(remainder).padStart(2, '0')}s`
+    : `${minutes}m ${String(remainder).padStart(2, '0')}s`;
 }
 
 function eventLog(event: SSEEvent): LogMessage | null {
@@ -202,6 +223,7 @@ export default function Dashboard() {
   const [dockerInfo,     setDockerInfo]     = useState<any>(null);
   const [runtimeLogs,    setRuntimeLogs]    = useState<RuntimeLogFile[]>([]);
   const [apiHealthy,     setApiHealthy]     = useState<boolean | null>(null);
+  const [clockNow,       setClockNow]       = useState(() => Date.now());
 
   /* UI state */
   const [logMessages,       setLogMessages]       = useState<LogMessage[]>([]);
@@ -470,6 +492,12 @@ export default function Dashboard() {
     const iv = setInterval(() => refreshAll().catch(() => {}), 30000);
     return () => clearInterval(iv);
   }, [refreshAll]);
+
+  useEffect(() => {
+    if (selectedScan?.status !== 'running') return;
+    const iv = setInterval(() => setClockNow(Date.now()), 1000);
+    return () => clearInterval(iv);
+  }, [selectedScan?.status]);
 
   useEffect(() => {
     if (selectedScan?.status !== 'running') return;
@@ -855,7 +883,7 @@ export default function Dashboard() {
                         <div>
                           <h2 style={{ fontSize: 13, fontWeight: 600, color: 'var(--text-primary)' }}>Engagement Timeline</h2>
                           <p style={{ marginTop: 3, fontSize: 12, color: 'var(--text-secondary)' }}>
-                            {selectedScan ? `${selectedScan.targets?.join(', ')} — ${formatAge(selectedScan.start_time)}` : 'No active engagement'}
+                            {selectedScan ? `${selectedScan.targets?.join(', ')} — elapsed ${formatElapsed(selectedScan, clockNow)}` : 'No active engagement'}
                           </p>
                         </div>
                         {selectedScan && (
@@ -865,7 +893,7 @@ export default function Dashboard() {
                                 <CircleStop size={14} />Stop
                               </button>
                             )}
-                            <button onClick={() => setShowReportModal(true)} className="btn btn-secondary">
+                            <button onClick={() => setShowReportModal(true)} disabled={selectedScan.status !== 'completed'} title={selectedScan.status === 'completed' ? 'Download final report' : 'Available after all scan phases complete'} className="btn btn-secondary">
                               <Download size={14} />Report
                             </button>
                             {selectedScan.status !== 'running' && (
@@ -1061,7 +1089,7 @@ export default function Dashboard() {
                     Refresh
                   </button>
                   {selectedScan && (
-                    <button onClick={() => setShowReportModal(true)} className="btn btn-secondary">
+                    <button onClick={() => setShowReportModal(true)} disabled={selectedScan.status !== 'completed'} title={selectedScan.status === 'completed' ? 'Download final report' : 'Available after all scan phases complete'} className="btn btn-secondary">
                       <FileText size={14} aria-hidden="true" />Report
                     </button>
                   )}

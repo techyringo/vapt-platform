@@ -58,8 +58,13 @@ interface ReportModalProps {
 export function ReportModal({ scan, onClose, onError }: ReportModalProps) {
   const [selected, setSelected] = useState<string>('html');
   const [downloading, setDownloading] = useState(false);
+  const finalReady = scan.status === 'completed';
 
   const handleDownload = async () => {
+    if (!finalReady) {
+      onError('Final report will be available after every scan phase completes.');
+      return;
+    }
     const fmt = FORMATS.find(f => f.id === selected);
     if (!fmt || !fmt.available) return;
     setDownloading(true);
@@ -124,6 +129,11 @@ export function ReportModal({ scan, onClose, onError }: ReportModalProps) {
         </div>
 
         <div className="modal-body">
+          {!finalReady && (
+            <div style={{ marginBottom: 12, padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(234,179,8,.45)', background: 'rgba(234,179,8,.08)', color: '#eab308', fontSize: 12 }}>
+              Scan is still in progress. Final reporting is locked until fuzzing and all remaining phases finish.
+            </div>
+          )}
           <div style={{ marginBottom: 8 }}>
             <div className="section-label" style={{ marginBottom: 10 }}>Select format</div>
             <div style={{ display: 'grid', gap: 6 }}>
@@ -209,7 +219,7 @@ export function ReportModal({ scan, onClose, onError }: ReportModalProps) {
           </button>
           <button
             onClick={handleDownload}
-            disabled={downloading || !FORMATS.find(f => f.id === selected)?.available}
+            disabled={!finalReady || downloading || !FORMATS.find(f => f.id === selected)?.available}
             className="btn btn-primary"
             style={{ height: 34 }}
           >
