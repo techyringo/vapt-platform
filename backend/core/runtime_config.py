@@ -84,7 +84,7 @@ def save_runtime_llm(llm: dict[str, Any]) -> dict[str, Any]:
 # without an env rewrite; it is never returned by the API.
 _LLM_FIELDS = (
     "provider", "model", "base_url", "verify_ssl", "api_key_env", "api_key",
-    "analysis_model", "report_model", "review_model", "temperature", "max_tokens",
+    "analysis_model", "report_model", "review_model", "temperature", "max_tokens", "max_rpm",
     "fallback_providers", "enabled", "allow_fallbacks",
 )
 _LLM_EMPTY_STRING_FIELDS = {"api_key", "api_key_env"}

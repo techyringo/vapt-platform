@@ -34,6 +34,7 @@ export function LLMConfigPanel() {
   const [reviewModel, setReviewModel] = useState('');
   const [temperature, setTemperature] = useState(0.3);
   const [maxTokens, setMaxTokens] = useState(4096);
+  const [maxRpm, setMaxRpm] = useState(40);
   const [enabled, setEnabled] = useState(true);
   const [allowFallbacks, setAllowFallbacks] = useState(true);
   const [probes, setProbes] = useState<Record<number, LLMProbe | null>>({});
@@ -70,6 +71,7 @@ export function LLMConfigPanel() {
       setReviewModel(c.review_model || c.analysis_model || c.model);
       setTemperature(c.temperature ?? 0.3);
       setMaxTokens(c.max_tokens ?? 4096);
+      setMaxRpm(c.max_rpm ?? 40);
       setEnabled(c.enabled ?? true);
       setAllowFallbacks(c.allow_fallbacks ?? true);
       setProbes({});
@@ -121,8 +123,10 @@ export function LLMConfigPanel() {
         verify_ssl: ep.verify_ssl, api_key: ep.api_key, api_key_env: ep.api_key_env,
       });
       setProbes(prev => ({ ...prev, [i]: r.probe }));
-      if (r.probe.reachable) {
-        toast.success(`Endpoint ${i + 1} reachable`, `${r.probe.models.length} model(s) visible`);
+      if (r.probe.inference_ready) {
+        toast.success(`Endpoint ${i + 1} ready`, `Authenticated inference passed in ${r.probe.latency_ms ?? '—'} ms`);
+      } else if (r.probe.reachable) {
+        toast.error(`Endpoint ${i + 1} reachable but unusable`, r.probe.error || 'Inference test did not pass');
       } else {
         toast.error(`Endpoint ${i + 1} failed`, r.probe.error || 'unreachable');
       }
@@ -150,6 +154,7 @@ export function LLMConfigPanel() {
         review_model: reviewModel || analysisModel || primary.model,
         temperature,
         max_tokens: maxTokens,
+        max_rpm: maxRpm,
         fallback_providers: endpoints.slice(1).map(ep => ({
           provider: ep.provider, model: ep.model, base_url: ep.base_url,
           api_key: ep.api_key, api_key_env: ep.api_key_env, verify_ssl: ep.verify_ssl,
@@ -164,7 +169,11 @@ export function LLMConfigPanel() {
         return { ...ep, has_api_key: f?.has_api_key ?? false, api_key: '' };
       }));
       setProbes({ 0: r.probe });
-      toast.success('LLM endpoints saved', `${endpoints.length} source(s) · primary ${primary.provider}:${primary.model || '—'}`);
+      if (r.probe.inference_ready) {
+        toast.success('LLM endpoints saved', `${endpoints.length} source(s) · authenticated inference passed`);
+      } else {
+        toast.error('Settings saved, but inference failed', r.probe.error || `${primary.provider}:${primary.model || '—'} is not ready`);
+      }
     } catch (e: any) {
       toast.error('Save failed', e.message);
     } finally {
@@ -204,6 +213,11 @@ export function LLMConfigPanel() {
           max_tokens
           <input className="field" style={{ height: 28, width: 80 }} type="number" step="256" min="1"
             value={maxTokens} onChange={e => setMaxTokens(parseInt(e.target.value) || 1)} />
+        </label>
+        <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, color: 'var(--text-secondary)' }}>
+          requests/min
+          <input className="field" style={{ height: 28, width: 72 }} type="number" step="1" min="1"
+            value={maxRpm} onChange={e => setMaxRpm(parseInt(e.target.value) || 1)} />
         </label>
       </div>
 
@@ -259,6 +273,11 @@ export function LLMConfigPanel() {
                 <input className="field" style={{ height: 34 }} value={ep.api_key_env}
                   onChange={e => update(i, { api_key_env: e.target.value })} placeholder="api_key_env (optional)" />
               </div>
+              {ep.base_url.includes('integrate.api.nvidia.com') && ep.api_key_env === 'OPENAI_API_KEY' && !ep.api_key && (
+                <div style={{ marginTop: 6, fontSize: 11, color: 'var(--medium)' }}>
+                  NVIDIA endpoint is currently reading OPENAI_API_KEY. Re-enter the NVIDIA key above or change this to NVIDIA_API_KEY.
+                </div>
+              )}
 
               {isPrimary && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>
@@ -283,13 +302,18 @@ export function LLMConfigPanel() {
 
               {probe && (
                 <div style={{ marginTop: 10, fontSize: 11 }}>
-                  {probe.reachable ? (
+                  {probe.inference_ready ? (
                     <span style={{ color: 'var(--low)' }}>
                       <CheckCircle2 size={12} style={{ display: 'inline', marginRight: 4, verticalAlign: '-1px' }} aria-hidden="true" />
-                      Reachable · {probe.models.length} model(s)
+                      Inference ready · {probe.latency_ms ?? '—'} ms · {probe.models.length} model(s)
                       {ep.model && probe.selected_model_present === false && (
                         <span style={{ color: 'var(--medium)', marginLeft: 6 }}>· model NOT listed</span>
                       )}
+                    </span>
+                  ) : probe.reachable ? (
+                    <span style={{ color: 'var(--critical)' }}>
+                      <WifiOff size={12} style={{ display: 'inline', marginRight: 4, verticalAlign: '-1px' }} aria-hidden="true" />
+                      Reachable, but inference failed · {probe.error || 'authentication or model error'}
                     </span>
                   ) : (
                     <span style={{ color: 'var(--critical)' }}>
@@ -297,7 +321,7 @@ export function LLMConfigPanel() {
                       {probe.error || 'unreachable'}
                     </span>
                   )}
-                  {probe.reachable && probe.models.length > 0 && (
+                  {probe.models.length > 0 && (
                     <div style={{ marginTop: 6, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
                       {probe.models.slice(0, 16).map(m => (
                         <span key={m} style={{

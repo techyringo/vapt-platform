@@ -183,6 +183,35 @@ export interface AttackSurfacePlan {
   planned_capabilities: AttackSurfacePlanItem[];
 }
 
+export interface AgentDecision {
+  decision_id: string;
+  phase: string;
+  status: string;
+  created_at: string;
+  input_evidence: string[];
+  selected: Array<{ tool: string; capability: string; reason: string; consumes: string[]; produces: string[] }>;
+  hypotheses: string[];
+  coverage_gaps: string[];
+  model_trace: { used: boolean; provider: string; model: string; error: string };
+}
+
+export interface AttackChain {
+  chain_id: string;
+  name: string;
+  target_host: string;
+  status: 'verified' | 'hypothesis';
+  confidence: string;
+  impact: string;
+  nodes: Array<{ evidence_ref: string; title: string; severity: string; role: string }>;
+  edges: Array<{ source: string; target: string; relation: string; evidence_refs: string[] }>;
+}
+
+export interface AttackChainResult {
+  scan_id: string;
+  summary: { total: number; verified: number; hypotheses: number };
+  chains: AttackChain[];
+}
+
 export interface CoverageCheck {
   id: string;
   label: string;
@@ -212,6 +241,7 @@ export interface LLMFallbackProvider {
   api_key?: string;        // write-only (never returned)
   api_key_env?: string;
   verify_ssl?: boolean;
+  max_rpm?: number;
   has_api_key?: boolean;   // read-only
 }
 
@@ -227,6 +257,7 @@ export interface LLMConfig {
   review_model: string;
   temperature: number;
   max_tokens: number;
+  max_rpm: number;
   fallback_providers: LLMFallbackProvider[];
   enabled: boolean | null;
   allow_fallbacks: boolean | null;
@@ -244,6 +275,7 @@ export interface LLMConfigInput {
   review_model: string;
   temperature: number;
   max_tokens: number;
+  max_rpm: number;
   fallback_providers: LLMFallbackProvider[];
   enabled: boolean;
   allow_fallbacks: boolean;
@@ -260,6 +292,8 @@ export interface LLMTestInput {
 
 export interface LLMProbe {
   reachable: boolean;
+  inference_ready: boolean;
+  latency_ms: number | null;
   models: string[];
   selected_model_present: boolean | null;
   error: string;

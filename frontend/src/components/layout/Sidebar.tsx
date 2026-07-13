@@ -67,7 +67,7 @@ export function Sidebar({
         <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Dashboard" count={scanCount}     onClick={() => onTabChange('dashboard')} />
         <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings"  count={findingCount}  onClick={() => onTabChange('findings')} />
         <SidebarItem active={activeTab === 'agents'}    icon={Bot}             label="Agents"    count={agentCount}    onClick={() => onTabChange('agents')} />
-        <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Tools"     count={toolCount}     onClick={() => onTabChange('tools')} />
+        <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Execution" count={toolCount}     onClick={() => onTabChange('tools')} />
         <SidebarItem active={activeTab === 'config'}    icon={Settings}        label="Settings"                        onClick={() => onTabChange('config')} />
       </nav>
 

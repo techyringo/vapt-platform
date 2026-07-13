@@ -128,6 +128,10 @@ class LLMConfig(BaseModel):
     model: str = Field(default="gpt-4o", description="Primary model")
     temperature: float = Field(default=0.3, ge=0.0, le=2.0, description="Sampling temperature")
     max_tokens: int = Field(default=4096, ge=1, description="Max tokens per completion")
+    max_rpm: int = Field(
+        default=40, ge=1, le=10000,
+        description="Maximum requests per minute for this endpoint.",
+    )
     api_key_env: str = Field(default="OPENAI_API_KEY", description="Env var for API key")
     api_key: str = Field(default="", description="Inline API key (runtime-set; preferred over api_key_env when set). Stored locally, never returned by the API.")
     base_url: str = Field(default="", description="Base URL for local/OpenAI-compatible providers")

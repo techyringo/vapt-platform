@@ -54,6 +54,12 @@ export const api = {
   getAttackSurfacePlan: (id: string) =>
     fetchAPI<import('@/types').AttackSurfacePlan>(`/api/scans/${id}/attack-surface/plan`),
 
+  getDecisions: (id: string, limit: number = 100) =>
+    fetchAPI<{ scan_id: string; total: number; decisions: import('@/types').AgentDecision[] }>(`/api/scans/${id}/decisions?limit=${limit}`),
+
+  getAttackChains: (id: string) =>
+    fetchAPI<import('@/types').AttackChainResult>(`/api/scans/${id}/attack-chains`),
+
   getAgentStatus: (id: string) =>
     fetchAPI<{ scan_id: string; agents: Record<string, import('@/types').AgentStatus> }>(`/api/scans/${id}/agents`),
 

@@ -34,6 +34,8 @@ from core.asset_graph import AssetGraphBuilder, summarize_assets
 from core.config import AppConfig
 from core.display import display_port, display_target, display_url, redact_display_text
 from core.quality import enrich_finding_quality
+from core.adaptive_planner import AdaptivePlanner
+from core.attack_chain import compile_attack_chains
 from core.scope import ScopeManager
 from core.targeting import (
     TargetClassification,
@@ -99,6 +101,7 @@ class ScanManager:
         self._orchestrators: dict[str, Any] = {}    # scan_id -> orchestrator instance
         self._live_log_task: Optional[asyncio.Task] = None  # live tool-log relay
         self._store = PersistenceStore(config.database.url)
+        self._adaptive_planner = AdaptivePlanner(config)
         self._hydrate_from_store()
 
     @property
@@ -167,6 +170,37 @@ class ScanManager:
             events = [e for e in events if e.get("scan_id") == scan_id or e.get("type") == "ping"]
         limit = max(1, min(limit, 500))
         return [self._display_event(event) for event in events[-limit:]]
+
+    def get_decisions(self, scan_id: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Return the durable, replayable agent decision ledger for one scan."""
+        decisions = self._store.load_events(
+            scan_id,
+            event_type="agent_decision",
+            limit=max(1, min(limit, 500)),
+        )
+        return [self._display_event(event) for event in decisions]
+
+    def get_attack_chains(self, scan_id: str) -> dict[str, Any]:
+        """Compile evidence-backed paths without promoting hypotheses to findings."""
+        result = compile_attack_chains(self._findings.get(scan_id, []))
+        return {"scan_id": scan_id, **result}
+
+    async def _record_adaptive_decision(self, scan_id: str, phase: str) -> None:
+        orchestrator = self._orchestrators.get(scan_id)
+        if orchestrator is None or not hasattr(orchestrator, "get_evidence_snapshot"):
+            return
+        snapshot = orchestrator.get_evidence_snapshot()
+        decision = await self._adaptive_planner.plan(
+            scan_id=scan_id,
+            phase=phase,
+            evidence_tokens=set(snapshot.get("evidence_tokens") or []),
+            already_run=set(snapshot.get("tools_run") or []),
+        )
+        await self._broadcast(ScanEvent(
+            event_type="agent_decision",
+            scan_id=scan_id,
+            data=decision,
+        ))
 
     async def _broadcast(self, event: ScanEvent, persist: bool = True) -> None:
         """Broadcast an event to all connected SSE clients.
@@ -1165,6 +1199,7 @@ class ScanManager:
                     self._store.update_scan_async(scan_id, {"current_phase": phase})
                 )
             asyncio.create_task(self._broadcast_phase(scan_id, phase, message))
+            asyncio.create_task(self._record_adaptive_decision(scan_id, phase))
 
         orchestrator.on_phase_change(on_phase_change)
 

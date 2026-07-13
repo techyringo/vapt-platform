@@ -35,7 +35,7 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentStatus, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentDecision, AgentStatus, AttackChainResult, Finding, NVDStats, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -194,6 +194,8 @@ export default function Dashboard() {
 	  const [agentStatus,    setAgentStatus]    = useState<Record<string, AgentStatus>>({});
 	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
 	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
+  const [decisions,      setDecisions]      = useState<AgentDecision[]>([]);
+  const [attackChains,   setAttackChains]   = useState<AttackChainResult | null>(null);
   const [modes,          setModes]          = useState<ScanMode[]>([]);
   const [nvdStats,       setNvdStats]       = useState<NVDStats | null>(null);
   const [toolsStatus,    setToolsStatus]    = useState<Record<string, any>>({});
@@ -404,17 +406,23 @@ export default function Dashboard() {
 	    setAgentStatus({});
 	    setToolRuns([]);
 	    setCoverage(null);
+	    setDecisions([]);
+	    setAttackChains(null);
 	    setLoadingFindings(true);
 	    Promise.allSettled([
 	      api.getFindings(selectedScan.scan_id),
 	      api.getAgentStatus(selectedScan.scan_id),
 	      api.getToolRuns(selectedScan.scan_id),
 	      api.getCoverage(selectedScan.scan_id),
-	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes]) => {
+	      api.getDecisions(selectedScan.scan_id),
+	      api.getAttackChains(selectedScan.scan_id),
+	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
 	      if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value.findings);
 	      if (agentRes.status === 'fulfilled')    setAgentStatus(agentRes.value.agents);
 	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
 	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	      if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
+	      if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	    }).finally(() => setLoadingFindings(false));
   }, [selectedScan?.scan_id]);
 
@@ -439,9 +447,13 @@ export default function Dashboard() {
 	      Promise.allSettled([
 	        api.getToolRuns(selectedScan.scan_id),
 	        api.getCoverage(selectedScan.scan_id),
-	      ]).then(([toolRunRes, coverageRes]) => {
+	        api.getDecisions(selectedScan.scan_id),
+	        api.getAttackChains(selectedScan.scan_id),
+	      ]).then(([toolRunRes, coverageRes, decisionsRes, chainsRes]) => {
 	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
 	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	        if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
+	        if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
 	      })
 	        .catch(() => {});
 	    };
@@ -625,6 +637,24 @@ export default function Dashboard() {
       total:    vals.length,
     };
   }, [operationalTools]);
+  const capabilityCoverage = useMemo(() => {
+    const labels: Record<string, string> = {
+      recon: 'Discovery & attack surface', enumeration: 'Network & service mapping',
+      vuln_scanning: 'Vulnerability validation', fuzzing: 'Web & API assessment',
+      exploitation: 'Impact validation', intelligence: 'Intelligence & correlation',
+      reporting: 'Evidence & reporting',
+    };
+    const groups: Record<string, { label: string; total: number; ready: number; gaps: number }> = {};
+    Object.values(toolsStatus).forEach((tool: any) => {
+      const phase = (tool.phases || [])[0] || 'extensions';
+      const group = groups[phase] ||= { label: labels[phase] || 'Extension capabilities', total: 0, ready: 0, gaps: 0 };
+      group.total += 1;
+      const ready = tool.availability === 'ready' && ['docker', 'local', 'internal', 'api'].includes(tool.will_use);
+      if (ready) group.ready += 1;
+      else group.gaps += 1;
+    });
+    return Object.entries(groups).sort((a, b) => a[1].label.localeCompare(b[1].label));
+  }, [toolsStatus]);
 
   const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
 
@@ -690,7 +720,7 @@ export default function Dashboard() {
         scanCount={scans.length}
         findingCount={totalFindings}
         agentCount={agentEntries.length}
-        toolCount={toolCounts.total}
+        toolCount={capabilityCoverage.reduce((sum, [, group]) => sum + group.gaps, 0)}
         connected={connected}
         apiHealthy={apiHealthy}
       />
@@ -1150,6 +1180,70 @@ export default function Dashboard() {
 	                    ))}
 	                  </div>
 
+                    <div className="card-glass" style={{ padding: 14 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                        <div>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Scan Strategy</h3>
+                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                            Capabilities selected from live scan evidence for each assessment phase
+                          </p>
+                        </div>
+                        <span className="badge badge-informational">{decisions.length} phase{decisions.length === 1 ? '' : 's'}</span>
+                      </div>
+                      {decisions.length === 0 ? (
+                        <div className="quiet-empty">Decisions appear as each scan phase begins.</div>
+                      ) : (
+                        <div className="coverage-list">
+                          {[...decisions].reverse().slice(0, 6).map(decision => (
+                            <div key={decision.decision_id} className="coverage-row">
+                              <div style={{ minWidth: 0 }}>
+                                <div className="coverage-title">{formatPhase(decision.phase)}</div>
+                                <div className="coverage-meta">
+                                  {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
+                                </div>
+                              </div>
+                              <span className="badge badge-completed">planned</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {attackChains && (
+                      <div className="card-glass" style={{ padding: 14 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                          <div>
+                            <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Evidence-backed Attack Paths</h3>
+                            <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                              {attackChains.summary.verified} verified · {attackChains.summary.hypotheses} hypotheses
+                            </p>
+                          </div>
+                          <span className={`badge ${attackChains.summary.verified ? 'badge-failed' : 'badge-idle'}`}>
+                            {attackChains.summary.total} path{attackChains.summary.total === 1 ? '' : 's'}
+                          </span>
+                        </div>
+                        {attackChains.chains.length === 0 ? (
+                          <div className="quiet-empty">No compatible evidence chain has been established.</div>
+                        ) : (
+                          <div className="coverage-list">
+                            {attackChains.chains.slice(0, 8).map(chain => (
+                              <div key={chain.chain_id} className="coverage-row">
+                                <div style={{ minWidth: 0 }}>
+                                  <div className="coverage-title">{chain.name}</div>
+                                  <div className="coverage-meta">
+                                    {chain.nodes.map(node => node.title).join(' → ')}
+                                  </div>
+                                </div>
+                                <span className={`badge ${chain.status === 'verified' ? 'badge-failed' : 'badge-running'}`}>
+                                  {chain.status}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+
 	                  {coverage && (
 	                    <div className="card-glass" style={{ padding: 14 }}>
 	                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
@@ -1248,9 +1342,9 @@ export default function Dashboard() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
                 <Wrench size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
                 <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Readiness</h2>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Execution Coverage</h2>
                   <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    {toolCounts.total} operational tools
+                    Capability coverage across approved local, container and API runtimes
                   </p>
                 </div>
               </div>
@@ -1258,8 +1352,8 @@ export default function Dashboard() {
               {/* Metric cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
                 <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
-                <MetricCard icon={Server}        label="Runnable Tools"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="ready for scans" tone="cyan" />
-                <MetricCard icon={Download}      label="Extension Images"  value={toolCounts.pullable} sub="available on demand" tone="amber" />
+                <MetricCard icon={Server}        label="Ready Runtimes"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="behind capability adapters" tone="cyan" />
+                <MetricCard icon={Download}      label="Coverage Gaps"     value={Object.values(toolsStatus).filter((t: any) => t.availability !== 'ready').length} sub="need runtime or credential" tone="amber" />
               </div>
 
               <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
@@ -1303,37 +1397,29 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* Tools grid */}
-              {Object.keys(operationalTools).length === 0 ? (
+              {/* Capability coverage — implementation tools stay behind adapters. */}
+              {capabilityCoverage.length === 0 ? (
                 apiHealthy === false ? (
                   <StateView variant="offline" title="Backend unreachable" body="Tool status will appear once the connection to the backend is restored." onRetry={handleRefresh} />
                 ) : (
                   <StateView variant="empty" icon={Wrench} title="No tool data" body="No tools have reported status yet." />
                 )
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
-                  {Object.entries(operationalTools).map(([name, tool]) => {
-                    const wu           = tool.will_use as string;
-                    const availability = tool.availability as string || wu;
-                    const isOk         = wu === 'docker' || wu === 'local' || wu === 'internal' || wu === 'api';
-                    const isPullable   = availability === 'pullable';
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
+                  {capabilityCoverage.map(([phase, group]) => {
+                    const complete = group.gaps === 0;
                     return (
-                      <div key={name} className="tool-row">
+                      <div key={phase} className="tool-row">
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-                            {tool.display_name || name}
+                            {group.label}
                           </div>
                           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {(tool.phases || []).slice(0, 2).join(', ') || tool.docker_image || 'local command'}
+                            {group.ready}/{group.total} execution adapters ready
                           </div>
                         </div>
-                        <span className={`badge ${
-                          wu === 'docker' ? 'badge-informational' :
-                          isPullable      ? 'badge-running' :
-                          isOk            ? 'badge-completed' :
-                          'badge-idle'
-                        }`}>
-                          {isPullable ? 'pullable' : wu}
+                        <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
+                          {complete ? 'covered' : `${group.gaps} gap${group.gaps === 1 ? '' : 's'}`}
                         </span>
                       </div>
                     );
