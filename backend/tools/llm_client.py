@@ -55,6 +55,32 @@ def _bearer_token(value: str) -> str:
         token = token[7:].strip()
     return token
 
+
+def _redact_llm_text(value: str, limit: int = 4000) -> str:
+    """Return a bounded, log-safe prompt/response preview."""
+    text = (value or "")[:limit]
+    patterns = (
+        (r"(?i)(authorization\s*[:=]\s*)([^\r\n]+)", r"\1[REDACTED]"),
+        (r"(?i)((?:set-)?cookie\s*[:=]\s*)([^\r\n]+)", r"\1[REDACTED]"),
+        (r"(?i)((?:api[_-]?key|token|password|secret|client_secret)\s*[:=]\s*)([^\s,;&]+)", r"\1[REDACTED]"),
+        (r"\bnvapi-[A-Za-z0-9_-]+", "[REDACTED_NVIDIA_KEY]"),
+    )
+    for pattern, replacement in patterns:
+        text = re.sub(pattern, replacement, text)
+    # Keep every audit event on one physical log line.
+    return text.replace("\r", "\\r").replace("\n", "\\n")
+
+
+def _safe_endpoint(value: str) -> str:
+    try:
+        parsed = urlparse(value or "")
+        host = parsed.hostname or ""
+        if parsed.port:
+            host = f"{host}:{parsed.port}"
+        return urlunparse((parsed.scheme, host, parsed.path, "", "", ""))
+    except Exception:
+        return "configured-endpoint"
+
 # Task categories for model routing. Triage-class tasks go to the smaller/faster
 # model (analysis_model, e.g. gemma); reasoning/report tasks go to the stronger
 # model (report_model, e.g. qwen). Unknown tasks use the provider's own model.
@@ -427,6 +453,7 @@ class LLMClient:
             "max_tokens": max_tokens, "json_mode": json_mode,
         }, sort_keys=True)
         cache_key = hashlib.sha256(cache_material.encode("utf-8")).hexdigest()
+        request_id = cache_key[:12]
         if cache_key in self._cache:
             cached = self._cache[cache_key]
             cached.cached = True
@@ -491,6 +518,31 @@ class LLMClient:
                 explicit_ctx=getattr(pc, "context_window", None),
             )
 
+            self._request_counts[rate_key] = self._request_counts.get(rate_key, 0) + 1
+            prompt_digest = hashlib.sha256(budgeted_prompt.encode("utf-8")).hexdigest()
+            trace_mode = os.environ.get("VAPT_LLM_TRACE", "metadata").strip().lower()
+            logger.info(
+                "[LLM_AUDIT] request id={id} task={task} provider={provider} model={model} "
+                "endpoint={endpoint} prompt_chars={prompt_chars} system_chars={system_chars} "
+                "prompt_sha256={digest} attempt={attempt}",
+                id=request_id,
+                task=task or "unspecified",
+                provider=pc.provider.value,
+                model=effective_model,
+                endpoint=_safe_endpoint(pc.base_url),
+                prompt_chars=len(budgeted_prompt),
+                system_chars=len(system_prompt),
+                digest=prompt_digest,
+                attempt=self._request_counts[rate_key],
+            )
+            if trace_mode == "redacted":
+                logger.info(
+                    "[LLM_AUDIT] prompt id={id} system={system} user={prompt}",
+                    id=request_id,
+                    system=_redact_llm_text(system_prompt, 2000),
+                    prompt=_redact_llm_text(budgeted_prompt, 6000),
+                )
+
             try:
                 response = await self._call_provider(
                     pc=pc,
@@ -501,6 +553,23 @@ class LLMClient:
                     max_tokens=effective_max,
                     json_mode=json_mode,
                 )
+
+                logger.info(
+                    "[LLM_AUDIT] response id={id} provider={provider} model={model} "
+                    "duration_ms={duration:.0f} response_chars={chars} error={error}",
+                    id=request_id,
+                    provider=pc.provider.value,
+                    model=effective_model,
+                    duration=response.duration_ms if response else 0,
+                    chars=len(response.content) if response else 0,
+                    error=(response.error or "none")[:300] if response else "empty response object",
+                )
+                if trace_mode == "redacted" and response and response.content:
+                    logger.info(
+                        "[LLM_AUDIT] response_body id={id} content={content}",
+                        id=request_id,
+                        content=_redact_llm_text(response.content, 4000),
+                    )
 
                 if response and not response.error and response.content.strip():
                     self._cache[cache_key] = response

@@ -419,6 +419,7 @@ class ReconAgent(BaseAgent):
                     entry for entry in OutputParser.parse_httpx(result.stdout)
                     if self.is_in_scope(entry.get("url", ""))
                 ]
+                await self._verify_http_bodies(parsed)
                 logger.info("[RECON] httpx: {live} live URLs", live=len(parsed))
                 return parsed
             if result.stderr:
@@ -430,6 +431,63 @@ class ReconAgent(BaseAgent):
                 os.unlink(host_path)
             except OSError:
                 pass
+
+    async def _verify_http_bodies(self, entries: list[dict[str, Any]]) -> None:
+        """Attach body proof and supplement header-only technology signals."""
+        if not entries:
+            return
+        client = await self._get_http_client()
+        semaphore = asyncio.Semaphore(5)
+
+        async def verify(entry: dict[str, Any]) -> None:
+            url = str(entry.get("url") or "")
+            if not url or not self.is_in_scope(url):
+                return
+            async with semaphore:
+                try:
+                    response = await client.get(url, timeout=15)
+                except Exception as exc:
+                    entry["body_verified"] = False
+                    entry["body_error"] = str(exc)[:200]
+                    return
+            from core.http_evidence import fingerprint_response
+            fp = fingerprint_response(response)
+            body = (response.text or "")[:100_000].lower()
+            tech = {str(item) for item in (entry.get("tech") or []) if item}
+            header_hints = (
+                response.headers.get("server", ""),
+                response.headers.get("x-powered-by", ""),
+            )
+            tech.update(item for item in header_hints if item)
+            markers = (
+                (("wp-content", "wordpress"), "WordPress"),
+                (("drupal", "/sites/default/"), "Drupal"),
+                (("joomla", "com_content"), "Joomla"),
+                (("ng-version", "<app-root"), "Angular"),
+                (("__next", "next.js"), "Next.js"),
+                (("reactroot", "data-reactroot"), "React"),
+                (("v-cloak", "vue.js"), "Vue.js"),
+                (("swagger-ui", '"openapi"'), "OpenAPI"),
+                (("jquery",), "jQuery"),
+            )
+            for needles, name in markers:
+                if any(needle in body for needle in needles):
+                    tech.add(name)
+            entry.update({
+                "status_code": response.status_code,
+                "content_type": fp.content_type,
+                "content_length": fp.length,
+                "body_sha256": fp.digest,
+                "body_verified": True,
+                "tech": sorted(tech),
+            })
+            logger.info(
+                "[RECON] Body verified {url}: status={status} type={ctype} bytes={length} sha256={digest}",
+                url=url, status=fp.status, ctype=fp.content_type or "unknown",
+                length=fp.length, digest=fp.digest[:16],
+            )
+
+        await asyncio.gather(*(verify(entry) for entry in entries[:20]))
 
     async def _run_waybackurls(self, domain: str) -> list[str]:
         """Collect historical URLs from Wayback Machine."""

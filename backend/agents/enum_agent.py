@@ -256,6 +256,7 @@ class EnumAgent(BaseAgent):
                     "-fs", "0",
                     "-t", "20",
                     "-mc", "all",
+                    "-ac",
                     "-o", "/dev/stdout",
                     "-of", "json",
                 ],

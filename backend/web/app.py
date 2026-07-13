@@ -1453,7 +1453,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     # ─── Report Download ────────────────────────────────────────
 
     @app.get("/api/scans/{scan_id}/report")
-    async def download_report(scan_id: str, format: str = "html"):
+    async def download_report(scan_id: str, format: str = "html", draft: bool = False):
         """Download an audit-ready report in html / pdf / markdown / json.
 
         If no report exists yet for the scan, it is generated on-the-fly by the
@@ -1464,6 +1464,15 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         scan = mgr.get_scan(scan_id)
         if not scan:
             raise HTTPException(status_code=404, detail="Scan not found")
+        scan_status = str(scan.get("status") or "").lower()
+        if scan_status != "completed" and not draft:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"Final report is unavailable while scan status is '{scan_status or 'unknown'}'. "
+                    "Wait for completion or request draft=true for a clearly partial snapshot."
+                ),
+            )
 
         cfg = get_config(app)
         reports_dir = Path(cfg.reporting.output_dir)
@@ -1656,7 +1665,11 @@ th {{ background: #eef3f8; }}
             and not report_missing_quality(path)
         ]
 
-        if not existing or (report_count(existing[0]) is not None and report_count(existing[0]) != expected_findings):
+        # A draft request is a deterministic snapshot only. It must never
+        # instantiate the final reporter while scanning phases are active.
+        if scan_status != "completed":
+            existing = []
+        elif not existing or (report_count(existing[0]) is not None and report_count(existing[0]) != expected_findings):
             from agents.reporter import ReportAgent
             from core.models import AgentTask, AgentType, ScanPhase, ScopeConfig, Target
             from core.scope import ScopeManager

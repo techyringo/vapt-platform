@@ -37,6 +37,7 @@ records so the caller can log them.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -107,7 +108,14 @@ class CVEResolver:
             ))
 
         # ── Step 2: ask the LLM to propose additional candidates ──
-        llm_proposals = await self._llm_propose(finding)
+        # Per-finding CVE guessing creates a large, low-value API fan-out and
+        # repeats work again in the intelligence phase. Scanner-emitted CVEs
+        # are still verified with NVD. Optional LLM proposals are an explicit
+        # operator choice, disabled by default.
+        enable_llm = os.environ.get("VAPT_CVE_LLM_PROPOSALS", "false").lower() in {
+            "1", "true", "yes", "on",
+        }
+        llm_proposals = await self._llm_propose(finding) if enable_llm else []
         for prop in llm_proposals:
             identifier = prop.get("identifier", "").upper().strip()
             kind = prop.get("kind", "").lower()

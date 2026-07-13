@@ -12,6 +12,7 @@ Cloud infrastructure security assessment:
 """
 
 import asyncio
+import ipaddress
 import json
 import os
 import re
@@ -48,6 +49,30 @@ class CloudAgent(BaseAgent):
         recon_data = task.parameters.get("recon_data", task.result or {})
         subdomains = recon_data.get("subdomains", [])
         live_urls = recon_data.get("live_urls", [])
+
+        # Private IPs and local-only hostnames cannot produce meaningful
+        # public DNS/storage candidates. Guessing S3 names from 172.17.0.1 is
+        # noise and can touch infrastructure outside the engagement scope.
+        try:
+            parsed_ip = ipaddress.ip_address(domain)
+        except ValueError:
+            parsed_ip = None
+        local_name = domain.lower() in {"localhost", "host.docker.internal"} or domain.lower().endswith(
+            (".localhost", ".local", ".internal")
+        )
+        if local_name or (parsed_ip is not None and not parsed_ip.is_global):
+            logger.info("[CLOUD] Skipping public cloud discovery for private/local target {domain}", domain=domain)
+            task.result = {
+                "cloud_assets": [],
+                "total_cloud_findings": 0,
+                "coverage": {
+                    "public_cloud_discovery": {
+                        "status": "not_applicable",
+                        "reason": "private_or_local_target",
+                    }
+                },
+            }
+            return []
 
         # Phase 1: DNS Record Analysis
         await self._analyze_dns_records(domain)
