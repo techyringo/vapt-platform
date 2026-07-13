@@ -32,12 +32,27 @@ import json
 import os
 import re
 import time
+import threading
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Optional
 from urllib.parse import urlparse, urlunparse
 
+from loguru import logger
+
 from core.llm_budget import budget_prompt
+
+
+_GLOBAL_RATE_WINDOWS: dict[str, list[float]] = {}
+_GLOBAL_RATE_LOCK = threading.Lock()
+
+
+def _bearer_token(value: str) -> str:
+    """Normalize pasted API keys, including an accidental Bearer prefix."""
+    token = (value or "").strip()
+    if token.lower().startswith("bearer "):
+        token = token[7:].strip()
+    return token
 
 # Task categories for model routing. Triage-class tasks go to the smaller/faster
 # model (analysis_model, e.g. gemma); reasoning/report tasks go to the stronger
@@ -109,6 +124,7 @@ class ProviderConfig:
     api_key: str = ""
     base_url: str = ""
     max_tokens: int = 4096
+    max_rpm: int = 40
     temperature: float = 0.3
     timeout: int = 120
     enabled: bool = True
@@ -223,6 +239,7 @@ class LLMClient:
             base_url=getattr(llm, "base_url", ""),
             verify_ssl=getattr(llm, "verify_ssl", True),
             max_tokens=llm.max_tokens,
+            max_rpm=getattr(llm, "max_rpm", 40),
             temperature=llm.temperature,
             enabled=True,
         )
@@ -246,6 +263,7 @@ class LLMClient:
                             api_key=prov_cfg.get("api_key", ""),
                             base_url=prov_cfg.get("base_url", ""),
                             max_tokens=prov_cfg.get("max_tokens", 4096),
+                            max_rpm=int(prov_cfg.get("max_rpm", 40)),
                             temperature=prov_cfg.get("temperature", 0.3),
                             enabled=prov_cfg.get("enabled", True),
                             verify_ssl=prov_cfg.get("verify_ssl", True),
@@ -438,12 +456,14 @@ class LLMClient:
                 continue
 
             # Check rate limit
-            if not self._check_rate_limit(prov_name):
+            rate_key = f"{pc.provider.value}:{pc.base_url.rstrip('/') or pc.provider.value}"
+            if not self._reserve_rate_limit(rate_key, pc.max_rpm):
+                last_error = f"Rate limit reached for {prov_name} ({pc.max_rpm} requests/minute)"
                 continue
 
             # Check API key availability
             if pc.provider not in {LLMProvider.OLLAMA, LLMProvider.OPENAI_COMPAT}:
-                api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+                api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
                 if not api_key:
                     continue
 
@@ -477,10 +497,15 @@ class LLMClient:
 
                 if response and not response.error and response.content.strip():
                     self._cache[cache_key] = response
-                    self._track_request(prov_name)
                     return response
                 else:
                     last_error = response.error if response and response.error else "Empty response"
+                    logger.warning(
+                        "LLM call failed provider={provider} model={model}: {error}",
+                        provider=pc.provider.value,
+                        model=effective_model,
+                        error=last_error,
+                    )
 
             except Exception as exc:
                 last_error = str(exc)
@@ -605,7 +630,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="openai", model=model, error="openai package not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
         client = AsyncOpenAI(api_key=api_key, organization=pc.organization_id or None)
 
         messages = []
@@ -948,7 +973,7 @@ class LLMClient:
         headers = {
             "Content-Type": "application/json",
         }
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -1080,18 +1105,22 @@ class LLMClient:
     # Rate Limiting & Tracking
     # ────────────────────────────────────────────────────────────────
 
-    def _check_rate_limit(self, provider: str, max_rpm: int = 60) -> bool:
-        """Check if we're within rate limits for a provider."""
+    def _reserve_rate_limit(self, provider: str, max_rpm: int = 40) -> bool:
+        """Atomically reserve one request in a process-wide rolling window."""
         now = time.time()
-        window = self._rate_limits.setdefault(provider, [])
-        # Clean old entries (older than 60 seconds)
-        self._rate_limits[provider] = [t for t in window if now - t < 60]
-        return len(self._rate_limits[provider]) < max_rpm
+        with _GLOBAL_RATE_LOCK:
+            window = [t for t in _GLOBAL_RATE_WINDOWS.get(provider, []) if now - t < 60]
+            if len(window) >= max_rpm:
+                _GLOBAL_RATE_WINDOWS[provider] = window
+                return False
+            window.append(now)
+            _GLOBAL_RATE_WINDOWS[provider] = window
+        self._rate_limits[provider] = list(window)
+        self._request_counts[provider] = self._request_counts.get(provider, 0) + 1
+        return True
 
     def _track_request(self, provider: str) -> None:
-        """Record a request for rate limiting."""
-        self._rate_limits.setdefault(provider, []).append(time.time())
-        self._request_counts[provider] = self._request_counts.get(provider, 0) + 1
+        """Backward-compatible no-op; requests are recorded before dispatch."""
 
     def get_stats(self) -> dict[str, int]:
         """Return request counts per provider."""

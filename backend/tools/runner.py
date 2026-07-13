@@ -709,7 +709,7 @@ class DockerRunner:
                 self._map_wordlist_for_docker(host_to_container(a) if a.startswith(SHARED_DIR) else a)
                 for a in args
             ]
-            return await self._run_docker(
+            result = await self._run_docker(
                 tool_name=tool_name,
                 docker_image=tool_config.docker_image,
                 args=container_args,
@@ -718,6 +718,28 @@ class DockerRunner:
                 env=env,
                 cwd=cwd,
             )
+            # A configured registry image may disappear or become private.
+            # Fall back only to an already-installed, approved binary with the
+            # same adapter contract; never let an LLM invent or install code.
+            runtime_error = f"{result.stderr}\n{result.stdout}".lower()
+            image_failed = result.exit_code == 125 and any(marker in runtime_error for marker in (
+                "pull access denied", "denied", "manifest unknown", "not found", "unauthorized",
+            ))
+            if image_failed and shutil.which(tool_name):
+                logger.warning(
+                    "[RuntimeResolver] Container unavailable for {tool}; using approved local binary",
+                    tool=tool_name,
+                )
+                direct_args = [self._map_wordlist_for_direct(a) for a in args]
+                return await self._run_direct(
+                    tool_name=tool_name,
+                    args=direct_args,
+                    input_data=input_data,
+                    timeout=effective_timeout,
+                    env=env,
+                    cwd=cwd,
+                )
+            return result
 
         direct_args = [self._map_wordlist_for_direct(a) for a in args]
         return await self._run_direct(

@@ -8,7 +8,7 @@ const TABS = [
   { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Dash' },
   { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Finds' },
   { tab: 'agents'    as Tab, icon: Bot,             label: 'Agents' },
-  { tab: 'tools'     as Tab, icon: Wrench,          label: 'Tools' },
+  { tab: 'tools'     as Tab, icon: Wrench,          label: 'Exec' },
   { tab: 'config'    as Tab, icon: Settings,        label: 'Cfg' },
 ] as const;
 

@@ -212,6 +212,7 @@ export interface LLMFallbackProvider {
   api_key?: string;        // write-only (never returned)
   api_key_env?: string;
   verify_ssl?: boolean;
+  max_rpm?: number;
   has_api_key?: boolean;   // read-only
 }
 
@@ -227,6 +228,7 @@ export interface LLMConfig {
   review_model: string;
   temperature: number;
   max_tokens: number;
+  max_rpm: number;
   fallback_providers: LLMFallbackProvider[];
   enabled: boolean | null;
   allow_fallbacks: boolean | null;
@@ -244,6 +246,7 @@ export interface LLMConfigInput {
   review_model: string;
   temperature: number;
   max_tokens: number;
+  max_rpm: number;
   fallback_providers: LLMFallbackProvider[];
   enabled: boolean;
   allow_fallbacks: boolean;
@@ -260,6 +263,8 @@ export interface LLMTestInput {
 
 export interface LLMProbe {
   reachable: boolean;
+  inference_ready: boolean;
+  latency_ms: number | null;
   models: string[];
   selected_model_present: boolean | null;
   error: string;

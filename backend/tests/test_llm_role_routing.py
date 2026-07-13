@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from tools.llm_client import LLMClient, LLMResponse
+from tools.llm_client import LLMClient, LLMResponse, _GLOBAL_RATE_WINDOWS, _bearer_token
 
 
 def _config():
@@ -29,6 +29,21 @@ def _config():
         ],
     )
     return SimpleNamespace(llm=llm)
+
+
+def test_bearer_token_accepts_raw_or_prefixed_keys():
+    assert _bearer_token(" nvapi-test ") == "nvapi-test"
+    assert _bearer_token("Bearer nvapi-test") == "nvapi-test"
+
+
+def test_rate_limit_is_shared_and_reserves_failed_attempts():
+    _GLOBAL_RATE_WINDOWS.clear()
+    first = LLMClient(_config())
+    second = LLMClient(_config())
+    key = "openai_compat:https://integrate.api.nvidia.com"
+    assert first._reserve_rate_limit(key, 2) is True
+    assert second._reserve_rate_limit(key, 2) is True
+    assert first._reserve_rate_limit(key, 2) is False
 
 
 @pytest.mark.asyncio

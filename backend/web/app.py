@@ -33,6 +33,7 @@ import copy
 import os
 import re
 import json
+import time
 from pathlib import Path
 from typing import Any, Optional
 from datetime import datetime
@@ -112,6 +113,7 @@ class LLMConfigRequest(BaseModel):
     review_model: str = ""
     temperature: float = 0.3
     max_tokens: int = 4096
+    max_rpm: int = 40
     fallback_providers: list[dict[str, Any]] = []
     enabled: bool = True
     allow_fallbacks: bool = True
@@ -130,7 +132,7 @@ class LLMTestRequest(BaseModel):
 API_KEY_GROUPS: dict[str, list[str]] = {
     "llm": [
         "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY",
-        "GROQ_API_KEY", "TOGETHER_API_KEY",
+        "GROQ_API_KEY", "TOGETHER_API_KEY", "NVIDIA_API_KEY",
     ],
     "intel": [
         "NVD_API_KEY", "SHODAN_API_KEY", "CENSYS_API_ID",
@@ -460,6 +462,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "review_model": getattr(llm, "review_model", "") or llm.analysis_model or llm.model,
             "temperature": llm.temperature,
             "max_tokens": llm.max_tokens,
+            "max_rpm": getattr(llm, "max_rpm", 40),
             "fallback_providers": [
                 {
                     "provider": p.get("provider", ""),
@@ -467,6 +470,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                     "base_url": p.get("base_url", ""),
                     "api_key_env": p.get("api_key_env", ""),
                     "verify_ssl": p.get("verify_ssl", True),
+                    "max_rpm": int(p.get("max_rpm", 40)),
                     "has_api_key": bool(p.get("api_key", "") or os.environ.get(p.get("api_key_env", ""), "")),
                 }
                 for p in (llm.fallback_providers or [])
@@ -517,7 +521,14 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         and the OpenAI-compatible family (/v1/models).
         """
         provider, base_url = _normalise_llm_endpoint(provider, base_url)
-        out: dict[str, Any] = {"reachable": False, "models": [], "selected_model_present": None, "error": ""}
+        out: dict[str, Any] = {
+            "reachable": False,
+            "inference_ready": False,
+            "latency_ms": None,
+            "models": [],
+            "selected_model_present": None,
+            "error": "",
+        }
         try:
             import httpx
             if provider == "ollama":
@@ -531,6 +542,17 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 out["models"] = models
                 out["reachable"] = True
                 out["selected_model_present"] = _model_present(model, models)
+                if model:
+                    started = time.monotonic()
+                    async with httpx.AsyncClient(timeout=30, verify=verify_ssl) as c:
+                        completion = await c.post(
+                            f"{url}/api/chat",
+                            json={"model": model, "messages": [{"role": "user", "content": "Reply with OK."}], "stream": False},
+                        )
+                    out["latency_ms"] = round((time.monotonic() - started) * 1000)
+                    out["inference_ready"] = completion.status_code == 200
+                    if not out["inference_ready"]:
+                        out["error"] = f"Inference failed (HTTP {completion.status_code}): {completion.text[:200]}"
             elif provider == "http_basic_chat":
                 if not base_url:
                     out["error"] = "base_url required"
@@ -550,6 +572,18 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                     out["models"] = models
                     out["reachable"] = True
                     out["selected_model_present"] = _model_present(model, models)
+                    if model:
+                        started = time.monotonic()
+                        async with httpx.AsyncClient(timeout=30, verify=verify_ssl) as c:
+                            completion = await c.post(
+                                f"{base_url}/chat",
+                                auth=(u, p),
+                                json={"model": model, "messages": [{"role": "user", "content": "Reply with OK."}]},
+                            )
+                        out["latency_ms"] = round((time.monotonic() - started) * 1000)
+                        out["inference_ready"] = completion.status_code == 200
+                        if not out["inference_ready"]:
+                            out["error"] = f"Inference failed (HTTP {completion.status_code}): {completion.text[:200]}"
                 else:
                     out["error"] = f"HTTP {r.status_code}: {r.text[:200]}"
             else:
@@ -559,7 +593,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                     out["error"] = "base_url required"
                     return out
                 headers = {"Content-Type": "application/json"}
-                key = api_key or os.environ.get(api_key_env, "")
+                key = (api_key or os.environ.get(api_key_env, "")).strip()
+                if key.lower().startswith("bearer "):
+                    key = key[7:].strip()
                 if key:
                     headers["Authorization"] = f"Bearer {key}"
                 async with httpx.AsyncClient(timeout=10, verify=verify_ssl) as c:
@@ -569,6 +605,29 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                     out["models"] = models
                     out["reachable"] = True
                     out["selected_model_present"] = (model in models) if model else None
+                    if model:
+                        started = time.monotonic()
+                        async with httpx.AsyncClient(timeout=30, verify=verify_ssl) as c:
+                            completion = await c.post(
+                                f"{url}/v1/chat/completions",
+                                headers=headers,
+                                json={
+                                    "model": model,
+                                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                                    "temperature": 0,
+                                    "max_tokens": 8,
+                                },
+                            )
+                        out["latency_ms"] = round((time.monotonic() - started) * 1000)
+                        if completion.status_code == 200:
+                            out["inference_ready"] = True
+                        elif completion.status_code in (401, 403):
+                            out["error"] = (
+                                f"Inference auth failed (HTTP {completion.status_code}). "
+                                "Re-enter the API key; model listing alone does not validate inference credentials."
+                            )
+                        else:
+                            out["error"] = f"Inference failed (HTTP {completion.status_code}): {completion.text[:200]}"
                 elif r.status_code in (401, 403):
                     out["reachable"] = True
                     out["error"] = f"Auth failed (HTTP {r.status_code}) — endpoint reachable, key invalid"
@@ -633,6 +692,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "review_model": req.review_model or req.analysis_model or req.model,
             "temperature": req.temperature,
             "max_tokens": req.max_tokens,
+            "max_rpm": req.max_rpm,
             "fallback_providers": merged_fb,
             "enabled": req.enabled,
             "allow_fallbacks": req.allow_fallbacks,

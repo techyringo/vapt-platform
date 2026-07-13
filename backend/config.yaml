@@ -262,14 +262,6 @@ tools:
     docker_image: "xmendez/wfuzz:latest"
     timeout: 600
 
-  arjun:
-    enabled: true
-    timeout: 300
-
-  paramspider:
-    enabled: true
-    timeout: 300
-
   # JS Analysis
   secretfinder:
     enabled: true
@@ -355,7 +347,6 @@ tools:
 
   arjun:
     enabled: true
-    docker_image: "ghcr.io/s0md3v/arjun:latest"
     timeout: 600
     memory_limit: "768m"
 
@@ -425,6 +416,7 @@ llm:
   model: "gpt-4o"
   temperature: 0.3
   max_tokens: 4096
+  max_rpm: 40
   api_key_env: "OPENAI_API_KEY"
 
   # Task→model routing (used when a task tag is set on the LLM call):

@@ -625,6 +625,24 @@ export default function Dashboard() {
       total:    vals.length,
     };
   }, [operationalTools]);
+  const capabilityCoverage = useMemo(() => {
+    const labels: Record<string, string> = {
+      recon: 'Discovery & attack surface', enumeration: 'Network & service mapping',
+      vuln_scanning: 'Vulnerability validation', fuzzing: 'Web & API assessment',
+      exploitation: 'Impact validation', intelligence: 'Intelligence & correlation',
+      reporting: 'Evidence & reporting',
+    };
+    const groups: Record<string, { label: string; total: number; ready: number; gaps: number }> = {};
+    Object.values(toolsStatus).forEach((tool: any) => {
+      const phase = (tool.phases || [])[0] || 'extensions';
+      const group = groups[phase] ||= { label: labels[phase] || 'Extension capabilities', total: 0, ready: 0, gaps: 0 };
+      group.total += 1;
+      const ready = tool.availability === 'ready' && ['docker', 'local', 'internal', 'api'].includes(tool.will_use);
+      if (ready) group.ready += 1;
+      else group.gaps += 1;
+    });
+    return Object.entries(groups).sort((a, b) => a[1].label.localeCompare(b[1].label));
+  }, [toolsStatus]);
 
   const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
 
@@ -690,7 +708,7 @@ export default function Dashboard() {
         scanCount={scans.length}
         findingCount={totalFindings}
         agentCount={agentEntries.length}
-        toolCount={toolCounts.total}
+        toolCount={capabilityCoverage.reduce((sum, [, group]) => sum + group.gaps, 0)}
         connected={connected}
         apiHealthy={apiHealthy}
       />
@@ -1248,9 +1266,9 @@ export default function Dashboard() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
                 <Wrench size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
                 <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Readiness</h2>
+                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Execution Coverage</h2>
                   <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    {toolCounts.total} operational tools
+                    Capability coverage across approved local, container and API runtimes
                   </p>
                 </div>
               </div>
@@ -1258,8 +1276,8 @@ export default function Dashboard() {
               {/* Metric cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
                 <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
-                <MetricCard icon={Server}        label="Runnable Tools"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="ready for scans" tone="cyan" />
-                <MetricCard icon={Download}      label="Extension Images"  value={toolCounts.pullable} sub="available on demand" tone="amber" />
+                <MetricCard icon={Server}        label="Ready Runtimes"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="behind capability adapters" tone="cyan" />
+                <MetricCard icon={Download}      label="Coverage Gaps"     value={Object.values(toolsStatus).filter((t: any) => t.availability !== 'ready').length} sub="need runtime or credential" tone="amber" />
               </div>
 
               <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
@@ -1303,37 +1321,29 @@ export default function Dashboard() {
                 )}
               </div>
 
-              {/* Tools grid */}
-              {Object.keys(operationalTools).length === 0 ? (
+              {/* Capability coverage — implementation tools stay behind adapters. */}
+              {capabilityCoverage.length === 0 ? (
                 apiHealthy === false ? (
                   <StateView variant="offline" title="Backend unreachable" body="Tool status will appear once the connection to the backend is restored." onRetry={handleRefresh} />
                 ) : (
                   <StateView variant="empty" icon={Wrench} title="No tool data" body="No tools have reported status yet." />
                 )
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 8 }}>
-                  {Object.entries(operationalTools).map(([name, tool]) => {
-                    const wu           = tool.will_use as string;
-                    const availability = tool.availability as string || wu;
-                    const isOk         = wu === 'docker' || wu === 'local' || wu === 'internal' || wu === 'api';
-                    const isPullable   = availability === 'pullable';
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
+                  {capabilityCoverage.map(([phase, group]) => {
+                    const complete = group.gaps === 0;
                     return (
-                      <div key={name} className="tool-row">
+                      <div key={phase} className="tool-row">
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-                            {tool.display_name || name}
+                            {group.label}
                           </div>
                           <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {(tool.phases || []).slice(0, 2).join(', ') || tool.docker_image || 'local command'}
+                            {group.ready}/{group.total} execution adapters ready
                           </div>
                         </div>
-                        <span className={`badge ${
-                          wu === 'docker' ? 'badge-informational' :
-                          isPullable      ? 'badge-running' :
-                          isOk            ? 'badge-completed' :
-                          'badge-idle'
-                        }`}>
-                          {isPullable ? 'pullable' : wu}
+                        <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
+                          {complete ? 'covered' : `${group.gaps} gap${group.gaps === 1 ? '' : 's'}`}
                         </span>
                       </div>
                     );
