@@ -233,8 +233,33 @@ export interface AssetGraph {
   summary: Record<string, number>;
   total_assets: number;
   total_edges: number;
+  raw_observations: number;
+  raw_relationships: number;
+  canonicalized: boolean;
   assets: AssetNode[];
   edges: AssetEdge[];
+}
+
+export interface AssuranceCategory {
+  category_id: string;
+  title: string;
+  status: 'tested' | 'observed' | 'not_tested';
+  executed_tools: string[];
+  observed_assets: string[];
+  evidence_refs: string[];
+  limitation: string;
+}
+
+export interface AssuranceCoverage {
+  scan_id: string;
+  catalog: string;
+  catalog_version: string;
+  claim: 'testing_coverage_only';
+  scope: string[];
+  summary: { total: number; tested: number; observed: number; not_tested: number; confirmed_proofs: number };
+  categories: AssuranceCategory[];
+  frameworks: Array<{ name: string; version: string; purpose: string; url: string }>;
+  disclaimer: string;
 }
 
 export interface AttackSurfacePlanItem {

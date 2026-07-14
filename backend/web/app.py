@@ -1540,6 +1540,14 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Scan not found")
         return mgr.get_control_evidence(scan_id)
 
+    @app.get("/api/scans/{scan_id}/assurance")
+    async def get_scan_assurance(scan_id: str):
+        """Return evidence-backed OWASP WSTG test coverage without compliance claims."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return mgr.get_assurance_coverage(scan_id)
+
     @app.get("/api/scans/{scan_id}/tool-runs/{run_id}/artifact")
     async def download_tool_artifact(scan_id: str, run_id: int, stream: str = "stdout"):
         """Download captured stdout/stderr artifact for one tool run."""

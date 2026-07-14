@@ -28,6 +28,7 @@ class AdaptivePlanner:
         phase: str,
         evidence_tokens: set[str],
         already_run: set[str],
+        available_tools: set[str] | None = None,
     ) -> dict[str, Any]:
         layers = target_layers_from_evidence(evidence_tokens)
         eligible = plan_next_tools(
@@ -35,6 +36,7 @@ class AdaptivePlanner:
             already_run=already_run,
             phase=phase,
             include_aggressive=False,
+            available_tools=available_tools,
             target_layers=layers or None,
         )
         candidates = [
@@ -126,6 +128,7 @@ class AdaptivePlanner:
                 "automatic_install_allowed": False,
                 "decision_authority": "deterministic_engagement_policy",
                 "model_role": "rank_eligible_candidates_only",
+                "runtime_intersection_applied": available_tools is not None,
             },
             "execution": {
                 "mode": "advisory",

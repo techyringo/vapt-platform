@@ -5,11 +5,11 @@ import { ClipboardCheck, Code2, GitBranch, LayoutDashboard, Settings, ShieldAler
 type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
 
 const TABS = [
-  { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Assess' },
+  { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Command' },
   { tab: 'appsec'    as Tab, icon: Code2,          label: 'Code' },
   { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Findings' },
-  { tab: 'agents'    as Tab, icon: GitBranch,       label: 'Paths' },
-  { tab: 'govern'    as Tab, icon: ClipboardCheck,  label: 'Evidence' },
+  { tab: 'agents'    as Tab, icon: GitBranch,       label: 'Surface' },
+  { tab: 'govern'    as Tab, icon: ClipboardCheck,  label: 'WSTG' },
   { tab: 'config'    as Tab, icon: Settings,        label: 'Admin' },
 ] as const;
 

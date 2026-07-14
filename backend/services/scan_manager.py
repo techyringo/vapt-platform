@@ -30,7 +30,7 @@ from core.models import (
     ScanMode, ScanPhase, AgentType, Target, Finding, AgentTask,
     ScanResult, ScopeConfig, Severity,
 )
-from core.asset_graph import AssetGraphBuilder, summarize_assets
+from core.asset_graph import AssetGraphBuilder, canonical_graph_projection, summarize_assets
 from core.config import AppConfig
 from core.display import display_port, display_target, display_url, redact_display_text
 from core.engagement_policy import engagement_limits
@@ -38,6 +38,7 @@ from core.quality import enrich_finding_quality
 from core.adaptive_planner import AdaptivePlanner
 from core.attack_chain import compile_attack_chains
 from core.control_evidence import build_control_evidence
+from core.assurance_coverage import build_assurance_coverage
 from core.scope import ScopeManager
 from core.targeting import (
     TargetClassification,
@@ -47,6 +48,7 @@ from core.targeting import (
     scope_from_classifications,
 )
 from core.tool_registry import plan_next_tools, target_layers_from_evidence
+from core.runtime_capabilities import executable_tool_names
 from database import PersistenceStore
 from services.nvd_service import NVDService
 
@@ -246,6 +248,18 @@ class ScanManager:
             ),
         }
 
+    def get_assurance_coverage(self, scan_id: str) -> dict[str, Any]:
+        """Project persisted evidence onto recognized OWASP testing domains."""
+        return {
+            "scan_id": scan_id,
+            **build_assurance_coverage(
+                scan=self._scans.get(scan_id, {}),
+                findings=self._findings.get(scan_id, []),
+                assets=self.get_asset_graph(scan_id).get("assets", []),
+                actions=self._store.load_durable_actions(scan_id),
+            ),
+        }
+
     async def _record_adaptive_decision(self, scan_id: str, phase: str) -> None:
         orchestrator = self._orchestrators.get(scan_id)
         if orchestrator is None or not hasattr(orchestrator, "get_evidence_snapshot"):
@@ -256,6 +270,7 @@ class ScanManager:
             phase=phase,
             evidence_tokens=set(snapshot.get("evidence_tokens") or []),
             already_run=set(snapshot.get("tools_run") or []),
+            available_tools=executable_tool_names(self._config),
         )
         await self._broadcast(ScanEvent(
             event_type="agent_decision",
@@ -974,13 +989,21 @@ class ScanManager:
             self._store.upsert_agent_status(scan_id, agent_key, statuses[agent_key])
 
     def get_asset_graph(self, scan_id: str, asset_type: Optional[str] = None) -> dict[str, Any]:
-        assets = self._store.load_assets(scan_id, asset_type=asset_type)
-        edges = self._store.load_asset_edges(scan_id)
+        raw_assets = self._store.load_assets(scan_id)
+        raw_edges = self._store.load_asset_edges(scan_id)
+        assets, edges = canonical_graph_projection(raw_assets, raw_edges)
+        if asset_type:
+            assets = [item for item in assets if item.get("asset_type") == asset_type]
+            visible = {str(item.get("asset_key")) for item in assets}
+            edges = [item for item in edges if item.get("source_key") in visible or item.get("target_key") in visible]
         return {
             "scan_id": scan_id,
             "summary": summarize_assets(assets),
             "total_assets": len(assets),
             "total_edges": len(edges),
+            "raw_observations": len(raw_assets),
+            "raw_relationships": len(raw_edges),
+            "canonicalized": len(raw_assets) != len(assets),
             "assets": assets,
             "edges": edges,
         }

@@ -93,7 +93,7 @@ async def startup(ctx: dict) -> None:
     else:
         logger.warning("[worker:startup] Docker unavailable — tools will run directly if installed")
 
-    logger.info("[worker:startup] Worker ready (max_jobs={max})", max=os.environ.get("WORKER_MAX_JOBS", "15"))
+    logger.info("[worker:startup] Worker ready (max_jobs={max})", max=os.environ.get("WORKER_MAX_JOBS", "3"))
 
 
 async def shutdown(ctx: dict) -> None:
@@ -109,7 +109,10 @@ class WorkerSettings:
 
     # How many concurrent jobs this worker process handles.
     # Each job = one Docker container.  Keep under the host's container limit.
-    max_jobs = int(os.environ.get("WORKER_MAX_JOBS", "15"))
+    # Scanner jobs are not ordinary HTTP tasks: each may own a browser, JVM,
+    # nuclei process or large crawler result. Fifteen jobs per worker caused
+    # queue connection resets and host pressure on the reference laptop.
+    max_jobs = max(1, int(os.environ.get("WORKER_MAX_JOBS", "3")))
 
     # Max seconds a single job can run before ARQ forcibly cancels it.
     job_timeout = 1800  # 30 min
