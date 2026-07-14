@@ -253,7 +253,7 @@ export interface ScanCoverage {
 }
 
 export interface AppSecCoverageLane {
-  status: 'planned' | 'running' | 'completed' | 'unavailable' | 'failed';
+  status: 'planned' | 'running' | 'completed' | 'partial' | 'unavailable' | 'failed';
   tool: string;
   findings?: number;
   error?: string;
@@ -263,6 +263,12 @@ export interface AppSecCoverageLane {
   manifests?: string[];
   rulepacks?: string[];
   files?: number;
+  source_files?: number;
+  scanned_files?: number;
+  skipped_files?: number;
+  scanner_errors?: number;
+  duration_seconds?: number;
+  limitation?: string;
 }
 
 export interface AppSecFinding {

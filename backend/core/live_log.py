@@ -66,6 +66,69 @@ def redact_tool_log_line(line: str) -> str:
     return _SECRET_VALUE_RE.sub(r"\1<redacted>", bounded)
 
 
+def prepare_tool_log_line(line: str, tool: str = "") -> str:
+    """Turn verbose scanner output into a compact, operator-safe live event.
+
+    Full stdout/stderr remains in the durable tool artifact. The live stream is
+    intentionally summarized so minified JavaScript and scanner JSON do not
+    overwhelm the UI or container logs.
+    """
+    raw = str(line).strip().replace("\x00", "")
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        # Katana can emit entire minified response bodies as one line. Those
+        # belong in the downloadable artifact, not the operational event feed.
+        if len(raw) > 800 and tool.lower() in {"katana", "hakrawler", "gau", "waybackurls"}:
+            return ""
+        return redact_tool_log_line(raw[:600])
+
+    if not isinstance(payload, dict):
+        return redact_tool_log_line(json.dumps(payload, separators=(",", ":"))[:600])
+
+    tool_name = tool.lower()
+    if tool_name == "httpx":
+        method = str(payload.get("method") or "GET")
+        url = str(payload.get("url") or payload.get("input") or "target")
+        status = payload.get("status_code")
+        tech = ", ".join(str(item) for item in (payload.get("tech") or [])[:5])
+        suffix = f" · {tech}" if tech else ""
+        return redact_tool_log_line(f"{method} {url} → HTTP {status or 'unknown'}{suffix}")
+
+    if tool_name == "katana":
+        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+        endpoint = request.get("endpoint") or payload.get("url") or payload.get("endpoint")
+        error = str(payload.get("error") or "")
+        if error.lower() in {"max depth reached", "duplicate endpoint"}:
+            return ""
+        if endpoint:
+            method = request.get("method") or "GET"
+            suffix = f" · {error}" if error else ""
+            return redact_tool_log_line(f"discovered {method} {endpoint}{suffix}")
+
+    # Generic JSONL scanners: retain only useful scalar evidence fields.
+    keys = (
+        "template-id", "template_id", "name", "host", "url", "matched-at",
+        "matched_at", "endpoint", "severity", "status_code", "level", "message",
+    )
+    compact = {key: payload[key] for key in keys if key in payload and not isinstance(payload[key], (dict, list))}
+    if compact:
+        return redact_tool_log_line(json.dumps(compact, separators=(",", ":"))[:600])
+    return ""
+
+
+def classify_tool_log_level(line: str, stream: str = "stdout") -> str:
+    """Classify a normalized event without treating JSON field names as failures."""
+    lowered = line.lower()
+    if re.search(r"(?:fatal|exception|traceback|\bfailed\b|\bfailure\b)", lowered):
+        return "error"
+    if re.search(r"(?:\bwarn(?:ing)?\b|timed?\s*out|rate.?limit|retry|connection reset)", lowered):
+        return "warn"
+    return "info"
+
+
 def _mirror_tool_log(msg: dict[str, Any]) -> None:
     """Mirror sampled tool output into worker/API container logs."""
     enabled = os.environ.get("VAPT_TOOL_LOG_MIRROR", "true").lower() in {"1", "true", "yes"}
@@ -77,10 +140,10 @@ def _mirror_tool_log(msg: dict[str, Any]) -> None:
         configured_max = 1000
     max_chars = max(120, min(configured_max, 2000))
     rendered = str(msg.get("line") or "")[:max_chars]
-    lowered = rendered.lower()
-    if re.search(r"(?:fatal|exception|traceback|\berror\b|\bfailed\b)", lowered):
+    level = str(msg.get("level") or "info")
+    if level == "error":
         log = logger.error
-    elif re.search(r"(?:warn|timed?\s*out|rate.?limit|retry)", lowered):
+    elif level == "warn":
         log = logger.warning
     else:
         # Many CLI tools write normal progress to stderr; the stream alone is
@@ -131,13 +194,17 @@ async def publish_tool_log(
     """Best-effort publish of one tool-log line. Never raises."""
     if not scan_id or not line:
         return
+    prepared = prepare_tool_log_line(line, tool)
+    if not prepared:
+        return
     msg = {
         "scan_id": scan_id,
         "tool": tool,
         "agent": agent,
         "phase": phase,
         "stream": stream,
-        "line": redact_tool_log_line(line),
+        "line": prepared,
+        "level": classify_tool_log_level(prepared, stream),
         "ts": time.time(),
     }
     _mirror_tool_log(msg)

@@ -183,12 +183,7 @@ function eventLog(event: SSEEvent): LogMessage | null {
     const line = event.line || event.data?.line || '';
     if (!line) return null;
     const stream = event.stream || event.data?.stream || 'stdout';
-    const lower = String(line).toLowerCase();
-    const level = /(?:fatal|exception|traceback|\berror\b|\bfailed\b)/.test(lower)
-      ? 'error'
-      : /(?:warn|timed?\s*out|rate.?limit|retry)/.test(lower)
-        ? 'warn'
-        : 'info';
+    const level = event.level || event.data?.level || 'info';
     return { msg: line, level, time, source: tool, phase: event.phase || event.data?.phase, stream, eventType: event.type };
   }
   if (event.type === 'phase_change') {
@@ -521,19 +516,6 @@ export default function Dashboard() {
     return () => clearInterval(iv);
   }, [selectedScan?.status]);
 
-  useEffect(() => {
-    if (selectedScan?.status !== 'running') return;
-    const iv = setInterval(() => {
-      setLogMessages(prev => [...prev.slice(-299), {
-        msg: `Still running: ${formatPhase(selectedScan.current_phase)} — ${selectedScan.targets?.join(', ') || 'target'}`,
-        level: 'info',
-        time: new Date().toLocaleTimeString(),
-      }]);
-    }, 15000);
-    return () => clearInterval(iv);
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedScan?.status, selectedScan?.current_phase, selectedScan?.targets?.join(',')]);
-
   /* ─── Actions ─── */
   const startScan = async () => {
     const targets = targetInput.split(/[\n,]+/).map(t => t.trim()).filter(Boolean);
@@ -675,32 +657,6 @@ export default function Dashboard() {
     : 0;
   const activeScans   = scans.filter(s => s.status === 'running').length;
   const dockerReady   = Boolean(dockerInfo?.daemon_reachable);
-  const operationalTools = useMemo(() => (
-    Object.fromEntries(
-      Object.entries(toolsStatus).filter(([, tool]: [string, any]) => {
-        const wu = tool.will_use as string;
-        const availability = tool.availability as string || wu;
-        return (
-          wu === 'docker' ||
-          wu === 'local' ||
-          wu === 'internal' ||
-          wu === 'api' ||
-          availability === 'pullable'
-        );
-      }),
-    )
-  ), [toolsStatus]);
-  const toolCounts    = useMemo(() => {
-    const vals = Object.values(operationalTools);
-    return {
-      docker:   vals.filter((t: any) => t.will_use === 'docker').length,
-      local:    vals.filter((t: any) => t.will_use === 'local').length,
-      internal: vals.filter((t: any) => t.will_use === 'internal').length,
-      api:      vals.filter((t: any) => t.will_use === 'api').length,
-      pullable: vals.filter((t: any) => t.availability === 'pullable').length,
-      total:    vals.length,
-    };
-  }, [operationalTools]);
   const capabilityCoverage = useMemo(() => {
     const labels: Record<string, string> = {
       recon: 'Discovery & attack surface', enumeration: 'Network & service mapping',
@@ -708,17 +664,67 @@ export default function Dashboard() {
       exploitation: 'Impact validation', intelligence: 'Intelligence & correlation',
       reporting: 'Evidence & reporting',
     };
-    const groups: Record<string, { label: string; total: number; ready: number; gaps: number }> = {};
-    Object.values(toolsStatus).forEach((tool: any) => {
+    type CoverageItem = {
+      name: string;
+      displayName: string;
+      state: 'ready' | 'on_demand' | 'blocked';
+      reason: string;
+    };
+    type CoverageGroup = {
+      label: string;
+      total: number;
+      ready: number;
+      onDemand: number;
+      blocked: number;
+      items: CoverageItem[];
+    };
+    const groups: Record<string, CoverageGroup> = {};
+    Object.entries(toolsStatus).forEach(([name, tool]: [string, any]) => {
       const phase = (tool.phases || [])[0] || 'extensions';
-      const group = groups[phase] ||= { label: labels[phase] || 'Extension capabilities', total: 0, ready: 0, gaps: 0 };
+      const group = groups[phase] ||= {
+        label: labels[phase] || 'Extension capabilities',
+        total: 0,
+        ready: 0,
+        onDemand: 0,
+        blocked: 0,
+        items: [],
+      };
       group.total += 1;
       const ready = tool.availability === 'ready' && ['docker', 'local', 'internal', 'api'].includes(tool.will_use);
-      if (ready) group.ready += 1;
-      else group.gaps += 1;
+      const onDemand = tool.availability === 'pullable';
+      let state: CoverageItem['state'] = 'blocked';
+      let reason = 'No approved local or container adapter is available.';
+      if (ready) {
+        state = 'ready';
+        reason = `${tool.will_use} adapter is ready.`;
+        group.ready += 1;
+      } else if (onDemand) {
+        state = 'on_demand';
+        reason = 'Approved image will be pulled only when evidence and policy select this capability.';
+        group.onDemand += 1;
+      } else {
+        group.blocked += 1;
+        if (tool.availability === 'needs_api_key') reason = 'Credential is required before this provider can run.';
+        else if (tool.availability === 'disabled_by_config') reason = 'Disabled by administrator policy.';
+      }
+      group.items.push({
+        name,
+        displayName: tool.display_name || name,
+        state,
+        reason,
+      });
     });
+    Object.values(groups).forEach(group => group.items.sort((a, b) => a.displayName.localeCompare(b.displayName)));
     return Object.entries(groups).sort((a, b) => a[1].label.localeCompare(b[1].label));
   }, [toolsStatus]);
+  const capabilityTotals = useMemo(() => capabilityCoverage.reduce(
+    (totals, [, group]) => ({
+      ready: totals.ready + group.ready,
+      onDemand: totals.onDemand + group.onDemand,
+      blocked: totals.blocked + group.blocked,
+    }),
+    { ready: 0, onDemand: 0, blocked: 0 },
+  ), [capabilityCoverage]);
 
   const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
 
@@ -1439,8 +1445,8 @@ export default function Dashboard() {
               {/* Metric cards */}
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
                 <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
-                <MetricCard icon={Server}        label="Ready Runtimes"    value={toolCounts.docker + toolCounts.local + toolCounts.internal + toolCounts.api} sub="behind capability adapters" tone="cyan" />
-                <MetricCard icon={Download}      label="Needs Setup"       value={Object.values(toolsStatus).filter((t: any) => t.availability !== 'ready').length} sub="optional runner or credential" tone="amber" />
+                <MetricCard icon={Server}        label="Ready Runtimes"    value={capabilityTotals.ready} sub="loaded capability adapters" tone="cyan" />
+                <MetricCard icon={Download}      label="On demand / blocked" value={`${capabilityTotals.onDemand} / ${capabilityTotals.blocked}`} sub="approved pull · admin action" tone="amber" />
               </div>
 
               <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
@@ -1463,13 +1469,9 @@ export default function Dashboard() {
                 ) : (
                   <div style={{ display: 'grid', gap: 8 }}>
                     {runtimeLogs.slice(0, 6).map(file => (
-                      <a
+                      <div
                         key={file.name}
                         className="tool-row"
-                        href={api.downloadLog(file.name)}
-                        target="_blank"
-                        rel="noreferrer"
-                        style={{ textDecoration: 'none' }}
                       >
                         <div style={{ minWidth: 0 }}>
                           <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, color: 'var(--text-primary)' }}>{file.name}</div>
@@ -1477,8 +1479,26 @@ export default function Dashboard() {
                             {(file.size / 1024).toFixed(1)} KB · {formatAge(file.modified_at)}
                           </div>
                         </div>
-                        <span className="badge badge-informational">download</span>
-                      </a>
+                        <div className="tool-run-actions">
+                          <a className="tool-run-link" href={api.downloadLog(file.name)} target="_blank" rel="noreferrer">
+                            <Download size={12} aria-hidden="true" />download
+                          </a>
+                          <button
+                            type="button"
+                            className="tool-run-link runtime-log-delete"
+                            onClick={() => {
+                              if (!window.confirm(`${file.name === 'vapt-runtime.log' ? 'Clear' : 'Delete'} ${file.name}?`)) return;
+                              api.deleteLog(file.name)
+                                .then(() => api.listLogs())
+                                .then(result => setRuntimeLogs(result.files || []))
+                                .then(() => toast.success('Runtime log updated', file.name))
+                                .catch((error: any) => toast.error('Could not update runtime log', error.message));
+                            }}
+                          >
+                            <Trash2 size={12} aria-hidden="true" />{file.name === 'vapt-runtime.log' ? 'clear' : 'delete'}
+                          </button>
+                        </div>
+                      </div>
                     ))}
                   </div>
                 )}
@@ -1494,21 +1514,37 @@ export default function Dashboard() {
               ) : (
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
                   {capabilityCoverage.map(([phase, group]) => {
-                    const complete = group.gaps === 0;
+                    const complete = group.blocked === 0;
+                    const actionable = group.items.filter(item => item.state !== 'ready');
                     return (
-                      <div key={phase} className="tool-row">
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', color: 'var(--text-primary)' }}>
-                            {group.label}
+                      <details key={phase} className="capability-group">
+                        <summary>
+                          <div style={{ minWidth: 0 }}>
+                            <div className="capability-group-title">{group.label}</div>
+                            <div className="capability-group-meta">
+                              {group.ready} ready · {group.onDemand} on demand · {group.blocked} blocked
+                            </div>
                           </div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {group.ready}/{group.total} execution adapters ready
-                          </div>
+                          <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
+                            {complete ? 'policy-ready' : `${group.blocked} blocked`}
+                          </span>
+                        </summary>
+                        <div className="capability-group-body">
+                          {actionable.length === 0 ? (
+                            <div className="capability-action-row">All registered adapters in this lane are ready.</div>
+                          ) : actionable.map(item => (
+                            <div key={item.name} className="capability-action-row">
+                              <div>
+                                <strong>{item.displayName}</strong>
+                                <span>{item.reason}</span>
+                              </div>
+                              <span className={`badge ${item.state === 'on_demand' ? 'badge-idle' : 'badge-running'}`}>
+                                {item.state === 'on_demand' ? 'on demand' : 'admin action'}
+                              </span>
+                            </div>
+                          ))}
                         </div>
-                        <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
-                          {complete ? 'ready' : `${group.gaps} need${group.gaps === 1 ? 's' : ''} setup`}
-                        </span>
-                      </div>
+                      </details>
                     );
                   })}
                 </div>

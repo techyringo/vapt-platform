@@ -130,6 +130,35 @@ def semgrep_rulepacks() -> list[str]:
     return list(dict.fromkeys(value.strip() for value in configured.split(",") if value.strip()))[:8]
 
 
+def semgrep_coverage(payload: dict, inventory: dict[str, object], duration: float) -> dict[str, object]:
+    """Describe what Semgrep actually analyzed instead of equating exit 0 with coverage."""
+    paths = payload.get("paths") if isinstance(payload.get("paths"), dict) else {}
+    scanned = paths.get("scanned") if isinstance(paths.get("scanned"), list) else None
+    skipped = paths.get("skipped") if isinstance(paths.get("skipped"), list) else []
+    errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
+    code_files = sum(int(value) for value in (inventory.get("languages") or {}).values())
+    status = "completed"
+    limitation = ""
+    if errors:
+        status = "partial"
+        limitation = f"Semgrep reported {len(errors)} analysis error(s)."
+    if code_files and scanned is not None and not scanned:
+        status = "partial"
+        limitation = "Semgrep reported zero analyzed source files."
+    evidence: dict[str, object] = {
+        "status": status,
+        "duration_seconds": round(float(duration), 2),
+        "source_files": code_files,
+        "scanner_errors": len(errors),
+        "skipped_files": len(skipped),
+    }
+    if scanned is not None:
+        evidence["scanned_files"] = len(scanned)
+    if limitation:
+        evidence["limitation"] = limitation
+    return evidence
+
+
 def _deduplicate_findings(findings: list[dict]) -> list[dict]:
     return list({item["fingerprint"]: item for item in findings}.values())
 
@@ -163,7 +192,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         scanners = [
             (
                 "semgrep", "sast",
-                ["semgrep", "scan", *semgrep_configs, "--json", "--metrics", "off", "--no-autofix", "--disable-version-check", container_workspace],
+                ["semgrep", "scan", *semgrep_configs, "--json", "--time", "--metrics", "off", "--no-autofix", "--disable-version-check", container_workspace],
                 parse_semgrep,
             ),
             (
@@ -179,16 +208,24 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             result = await runner.run_local(tool, args, timeout=900)
             store.append_appsec_run(assessment_id, lane, result.to_dict())
             if result.stdout.strip():
-                parsed = parser(_json_payload(result.stdout), repository)
+                payload = _json_payload(result.stdout)
+                parsed = parser(payload, repository)
                 findings.extend(parsed)
                 findings = _deduplicate_findings(findings)
                 coverage[lane].update({"status": "completed", "findings": len(parsed)})
+                coverage[lane]["duration_seconds"] = round(result.duration, 2)
+                if lane == "sast":
+                    coverage[lane].update(semgrep_coverage(payload, inventory, result.duration))
             elif result.success:
-                coverage[lane]["status"] = "completed"
+                coverage[lane].update({
+                    "status": "partial",
+                    "duration_seconds": round(result.duration, 2),
+                    "limitation": "Scanner exited successfully but produced no machine-readable evidence.",
+                })
             else:
                 coverage[lane].update({"status": "unavailable", "error": (result.stderr or "Scanner unavailable")[-500:]})
             store.replace_appsec_findings(assessment_id, findings)
-            unavailable_now = [name for name, state in coverage.items() if state["status"] == "unavailable"]
+            unavailable_now = [name for name, state in coverage.items() if state["status"] in {"unavailable", "partial"}]
             store.update_appsec_assessment(assessment_id, {
                 "coverage": coverage,
                 "summary": _summary(findings, unavailable_now),
@@ -249,7 +286,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             coverage[lane].update({"status": "unavailable", "error": (errors or "Secret scanners unavailable")[-500:]})
 
         store.replace_appsec_findings(assessment_id, findings)
-        unavailable = [lane for lane, state in coverage.items() if state["status"] == "unavailable"]
+        unavailable = [lane for lane, state in coverage.items() if state["status"] in {"unavailable", "partial"}]
         status = "partial" if unavailable else "completed"
         store.update_appsec_assessment(assessment_id, {
             "status": status,

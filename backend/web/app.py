@@ -1086,6 +1086,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
             raise HTTPException(status_code=400, detail="Invalid log filename")
         path = _log_dir() / filename
+        if path.is_symlink():
+            raise HTTPException(status_code=400, detail="Log links are not allowed")
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Log file not found")
         return path
@@ -1111,6 +1113,24 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             filename=path.name,
             media_type="application/octet-stream",
         )
+
+    @app.delete("/api/system/logs/{filename}")
+    async def delete_log_file(filename: str):
+        """Clear the active runtime log or remove a rotated log artifact."""
+        path = _safe_log_path(filename)
+        operation = "clear" if path.name == "vapt-runtime.log" else "delete"
+        try:
+            if path.name == "vapt-runtime.log":
+                # The Loguru sink holds this inode open with append semantics;
+                # truncating preserves the active sink while reclaiming space.
+                path.write_text("", encoding="utf-8")
+                action = "cleared"
+            else:
+                path.unlink()
+                action = "deleted"
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not {operation} log: {exc}") from exc
+        return {"name": filename, "action": action}
 
     @app.post("/api/tools/select")
     async def select_tools_for_context(request: ToolSelectionRequest):

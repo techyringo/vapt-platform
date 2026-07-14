@@ -201,14 +201,14 @@ export function AppSecWorkspace() {
                   const state = detail.coverage?.[key] || { status: 'planned', tool: key };
                   const Icon = meta.icon;
                   const profile = key === 'sast' && state.languages
-                    ? Object.keys(state.languages).slice(0, 4).join(', ')
+                    ? `${state.scanned_files ?? state.source_files ?? state.files ?? '?'} analyzed · ${Object.keys(state.languages).slice(0, 4).join(', ')}`
                     : key === 'sca' && state.manifests?.length
                       ? `${state.manifests.length} manifest${state.manifests.length === 1 ? '' : 's'}`
                       : state.verification || '';
                   return (
                     <article className={`appsec-lane ${statusTone(state.status)}`} key={key}>
                       <div className="appsec-lane-icon"><Icon size={17} /></div>
-                      <div><strong>{meta.label}</strong><span>{meta.description}</span><small>{state.tool} · {state.findings || 0} observations{profile ? ` · ${profile}` : ''}</small></div>
+                      <div><strong>{meta.label}</strong><span>{state.limitation || meta.description}</span><small>{state.tool} · {state.findings || 0} observations{profile ? ` · ${profile}` : ''}{state.duration_seconds !== undefined ? ` · ${state.duration_seconds}s` : ''}</small></div>
                       <LaneStatus status={state.status} />
                     </article>
                   );
@@ -238,7 +238,13 @@ export function AppSecWorkspace() {
                 <div className="appsec-search"><SearchCode size={14} /><input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter CVE, rule, file or package" /></div>
               </div>
               <div className="appsec-finding-list">
-                {findings.length === 0 && <div className="appsec-empty">{running ? 'Findings will appear after scanner evidence is normalized.' : 'No findings match this view.'}</div>}
+                {findings.length === 0 && <div className="appsec-empty">{
+                  running
+                    ? 'Findings will appear after scanner evidence is normalized.'
+                    : Object.values(detail.coverage || {}).some(item => ['partial', 'unavailable', 'failed'].includes(item.status))
+                      ? 'No finding claim is possible while one or more analysis lanes have incomplete evidence.'
+                      : 'No observations matched the configured scanners and rulepacks. Zero observations is not proof that the code is secure.'
+                }</div>}
                 {findings.map(item => <FindingRow finding={item} key={item.fingerprint} />)}
               </div>
             </>
@@ -256,7 +262,7 @@ function Metric({ label, value, tone = '' }: { label: string; value: string | nu
 function LaneStatus({ status }: { status: string }) {
   if (status === 'completed') return <CheckCircle2 size={17} />;
   if (status === 'running') return <RefreshCw size={17} className="animate-spin" />;
-  if (status === 'failed' || status === 'unavailable') return <AlertTriangle size={17} />;
+  if (status === 'partial' || status === 'failed' || status === 'unavailable') return <AlertTriangle size={17} />;
   return <ArrowRight size={17} />;
 }
 

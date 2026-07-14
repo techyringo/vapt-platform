@@ -112,6 +112,11 @@ export const api = {
   downloadLog: (name: string) =>
     apiUrl(`/api/system/logs/${encodeURIComponent(name)}/download`),
 
+  deleteLog: (name: string) =>
+    fetchAPI<{ name: string; action: 'cleared' | 'deleted' }>(`/api/system/logs/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
+
   // LLM configuration (runtime, frontend-configurable — no hardcoded model)
   getLLMConfig: () =>
     fetchAPI<{ llm: import('@/types').LLMConfig }>('/api/config/llm'),

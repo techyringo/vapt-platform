@@ -1,5 +1,5 @@
 from core.appsec import merge_secret_findings, parse_gitleaks, parse_semgrep, parse_trivy, parse_trufflehog
-from services.appsec_assessment import repository_inventory, semgrep_rulepacks, validate_ref, validate_repository_url
+from services.appsec_assessment import repository_inventory, semgrep_coverage, semgrep_rulepacks, validate_ref, validate_repository_url
 from database.store import PersistenceStore
 
 
@@ -145,6 +145,30 @@ def test_repository_inventory_reports_languages_and_manifests(tmp_path) -> None:
 def test_semgrep_rulepacks_are_configurable_and_deduplicated(monkeypatch) -> None:
     monkeypatch.setenv("VAPT_SEMGREP_RULESETS", "p/default,p/security-audit,p/default")
     assert semgrep_rulepacks() == ["p/default", "p/security-audit"]
+
+
+def test_semgrep_coverage_rejects_false_success_with_zero_scanned_files() -> None:
+    evidence = semgrep_coverage(
+        {"paths": {"scanned": [], "skipped": []}, "errors": []},
+        {"languages": {"Python": 4}, "files": 5, "manifests": []},
+        0.8,
+    )
+    assert evidence["status"] == "partial"
+    assert evidence["source_files"] == 4
+    assert evidence["scanned_files"] == 0
+    assert "zero analyzed" in str(evidence["limitation"])
+
+
+def test_semgrep_coverage_records_scanned_skipped_and_errors() -> None:
+    evidence = semgrep_coverage(
+        {"paths": {"scanned": ["a.py", "b.py"], "skipped": [{"path": "vendor.js"}]}, "errors": [{"message": "parse"}]},
+        {"languages": {"Python": 2}, "files": 3, "manifests": []},
+        2.25,
+    )
+    assert evidence["status"] == "partial"
+    assert evidence["scanned_files"] == 2
+    assert evidence["skipped_files"] == 1
+    assert evidence["scanner_errors"] == 1
 
 
 def test_appsec_store_round_trip(tmp_path) -> None:
