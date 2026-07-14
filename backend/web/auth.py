@@ -41,6 +41,11 @@ def _is_public(path: str) -> bool:
     """Return True if the path does not require an API key."""
     if not path.startswith("/api/"):
         return True  # Frontend static assets, etc.
+    # An OOB callback token is a short-lived, single-use capability issued by
+    # the scanner. A target cannot attach our API key to an SSRF callback, so
+    # only the callback receiver (never the status endpoint) is public.
+    if path.startswith("/api/oob/c/"):
+        return True
     return path in _PUBLIC_PATHS
 
 

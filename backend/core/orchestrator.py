@@ -553,6 +553,9 @@ class Orchestrator:
                          key=key, fields=len(result))
             # Feed evidence accumulator so the planner sees fresh tokens.
             self._ingest_evidence_from_phase_context(phase)
+            for run in result.get("tool_runs") or []:
+                if isinstance(run, dict) and run.get("tool"):
+                    self._tools_run.add(str(run["tool"]))
 
     def _build_task_parameters(
         self, agent_type: AgentType, scan_result: ScanResult
@@ -570,6 +573,20 @@ class Orchestrator:
         # evidence-driven decisions (e.g. fire wpscan only if tech_wordpress
         # is present, fire redis nuclei only if service_redis is present).
         params["evidence_tokens"] = frozenset(self._evidence)
+        current_phase = self._state_machine.current_phase.value
+        include_aggressive = scan_result.mode == ScanMode.FULL_VAPT
+        eligible = self.get_eligible_tools(
+            phase=current_phase,
+            include_aggressive=include_aggressive,
+        )
+        params["approved_capabilities"] = tuple(capability.name for capability in eligible)
+        params["capability_decision"] = {
+            "source": "deterministic_evidence_policy",
+            "phase": current_phase,
+            "evidence_tokens": sorted(self._evidence),
+            "approved": [capability.name for capability in eligible],
+            "aggressive_allowed": include_aggressive,
+        }
 
         # Downstream decision-making agents need the live scan_result and
         # existing findings. vuln_scanner uses recon findings to choose

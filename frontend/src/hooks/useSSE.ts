@@ -2,7 +2,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 import { SSEEvent } from '@/types';
 
 const API_BASE = (process.env.NEXT_PUBLIC_API_URL || '').replace(/\/$/, '');
-const SSE_EVENT_TYPES = ['scan_started', 'phase_change', 'finding', 'agent_status', 'log', 'tool_log', 'scan_complete', 'scan_failed', 'ping'] as const;
+const SSE_EVENT_TYPES = ['scan_started', 'phase_change', 'phase_complete', 'surface_update', 'finding', 'agent_status', 'agent_decision', 'log', 'tool_log', 'scan_complete', 'scan_failed', 'scan_deleted', 'ping'] as const;
 
 export function useSSE(onEvent?: (event: SSEEvent) => void) {
   const [connected, setConnected] = useState(false);

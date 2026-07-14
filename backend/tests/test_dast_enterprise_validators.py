@@ -40,3 +40,14 @@ def test_jwt_header_decoder_detects_alg_none_header():
     header = DASTValidator._decode_jwt_header(token)
 
     assert header == {"alg": "none", "typ": "JWT"}
+
+
+def test_planner_selects_oob_ssrf_for_url_inputs():
+    planner = DASTPlanner()
+    candidates = planner.collect_candidates(
+        recon_data={"live_urls": [{"url": "https://example.com/fetch?url=https://example.org"}]},
+    )
+
+    hypotheses = planner.build_hypotheses(candidates)
+
+    assert any(item.validator == "ssrf_http_oob" and item.candidate.parameter == "url" for item in hypotheses)

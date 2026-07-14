@@ -1,14 +1,15 @@
 'use client';
 
-import { Code2, GitBranch, LayoutDashboard, Settings, ShieldAlert } from 'lucide-react';
+import { ClipboardCheck, Code2, GitBranch, LayoutDashboard, Settings, ShieldAlert } from 'lucide-react';
 
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
+type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
 
 const TABS = [
   { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Assess' },
   { tab: 'appsec'    as Tab, icon: Code2,          label: 'Code' },
   { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Findings' },
   { tab: 'agents'    as Tab, icon: GitBranch,       label: 'Paths' },
+  { tab: 'govern'    as Tab, icon: ClipboardCheck,  label: 'Evidence' },
   { tab: 'config'    as Tab, icon: Settings,        label: 'Admin' },
 ] as const;
 

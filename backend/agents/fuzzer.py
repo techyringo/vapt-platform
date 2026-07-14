@@ -49,19 +49,22 @@ class FuzzingAgent(BaseAgent):
         live_urls = recon_data.get("live_urls", [])
         historical_urls = recon_data.get("historical_urls", [])
         js_endpoints = enum_data.get("js_endpoints", [])
+        policy_bound = "approved_capabilities" in task.parameters
+        approved_capabilities = set(task.parameters.get("approved_capabilities") or ())
+        ffuf_allowed = not policy_bound or "ffuf" in approved_capabilities
 
         all_new_endpoints: list[dict] = []
         fuzz_tasks = []
 
         # Strategy 1: Directory fuzzing on live targets
-        for entry in live_urls[:10]:
+        for entry in (live_urls[:10] if ffuf_allowed else []):
             url = entry.get("url", "")
             if url and self.is_in_scope(url):
                 fuzz_tasks.append(self._fuzz_directories(url))
 
         # Strategy 2: Extension fuzzing on discovered paths
         discovered_paths = self._extract_paths(historical_urls + js_endpoints)
-        if discovered_paths and live_urls:
+        if ffuf_allowed and discovered_paths and live_urls:
             base_url = live_urls[0].get("url", "")
             if base_url:
                 fuzz_tasks.append(self._fuzz_extensions(base_url, discovered_paths[:20]))
@@ -72,7 +75,7 @@ class FuzzingAgent(BaseAgent):
             fuzz_tasks.append(self._fuzz_api_versions(api_endpoints[:10]))
 
         # Strategy 4: Backup and config file fuzzing
-        if live_urls:
+        if ffuf_allowed and live_urls:
             base_url = live_urls[0].get("url", "")
             if base_url:
                 fuzz_tasks.append(self._fuzz_sensitive_files(base_url))

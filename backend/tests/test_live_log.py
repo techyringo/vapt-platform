@@ -45,3 +45,9 @@ def test_katana_depth_noise_and_minified_body_are_not_streamed() -> None:
 
     assert depth == ""
     assert script == ""
+
+
+def test_structured_scanner_fragments_and_response_bodies_are_not_streamed() -> None:
+    assert prepare_tool_log_line('"results": [', "semgrep") == ""
+    assert prepare_tool_log_line("<html>" + ("x" * 900), "nuclei") == ""
+    assert prepare_tool_log_line("Scanning 42 files", "semgrep") == "Scanning 42 files"

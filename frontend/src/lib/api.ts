@@ -66,6 +66,12 @@ export const api = {
   getToolRuns: (id: string) =>
     fetchAPI<{ scan_id: string; total: number; tool_runs: import('@/types').ToolRun[] }>(`/api/scans/${id}/tool-runs`),
 
+  getOperation: (id: string) =>
+    fetchAPI<import('@/types').DurableOperation>(`/api/scans/${id}/operation`),
+
+  getControlEvidence: (id: string) =>
+    fetchAPI<import('@/types').ControlEvidence>(`/api/scans/${id}/control-evidence`),
+
   downloadToolArtifact: (scanId: string, runId: number, stream: 'stdout' | 'stderr' = 'stdout') =>
     apiUrl(`/api/scans/${scanId}/tool-runs/${runId}/artifact?stream=${stream}`),
 
@@ -90,6 +96,12 @@ export const api = {
 
   getAppSecAssessment: (id: string) =>
     fetchAPI<import('@/types').AppSecAssessment>(`/api/appsec/assessments/${id}`),
+
+  downloadAppSecSarif: (id: string) =>
+    apiUrl(`/api/appsec/assessments/${id}/sarif`),
+
+  downloadAppSecArtifact: (id: string, kind: string) =>
+    apiUrl(`/api/appsec/assessments/${id}/artifacts/${encodeURIComponent(kind)}`),
 
   downloadReport: (id: string, format: string = 'html') =>
     apiUrl(`/api/scans/${id}/report?format=${format}`),

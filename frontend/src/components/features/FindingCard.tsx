@@ -66,7 +66,7 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
                 background: 'rgba(34,197,94,0.07)',
                 color: 'var(--low)',
               }}>
-                NVD ✓
+                CVE catalogued
               </span>
             )}
             {finding.evidence_grade && (
@@ -92,7 +92,7 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
               </span>
             )}
             <span className={`badge ${finding.status === 'confirmed' ? 'badge-completed' : 'badge-running'}`}>
-              {finding.status === 'confirmed' ? 'verified' : finding.status || 'candidate'}
+              {finding.status === 'confirmed' ? 'behavior verified' : (finding.tags || []).includes('version-applicability-candidate') ? 'version matched' : finding.status || 'candidate'}
             </span>
           </div>
           <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11 }}>
