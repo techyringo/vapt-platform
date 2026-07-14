@@ -19,7 +19,7 @@ import json
 import re
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Callable, Optional
 from collections import defaultdict
@@ -37,6 +37,7 @@ from core.engagement_policy import engagement_limits
 from core.quality import enrich_finding_quality
 from core.adaptive_planner import AdaptivePlanner
 from core.attack_chain import compile_attack_chains
+from core.control_evidence import build_control_evidence
 from core.scope import ScopeManager
 from core.targeting import (
     TargetClassification,
@@ -122,14 +123,23 @@ class ScanManager:
                 for agent_name, status_data in statuses.items()
             }
         self._event_history = self._store.load_recent_events(limit=1000)
+        recovered_actions = self._store.recover_stale_actions(
+            (datetime.utcnow() - timedelta(minutes=30)).isoformat()
+        )
+        if recovered_actions:
+            logger.warning(
+                "Marked {count} stale runner action(s) retryable after startup recovery",
+                count=recovered_actions,
+            )
 
         for scan_id, scan in self._scans.items():
             if scan.get("status") == "running":
                 scan.update({
-                    "status": "failed",
-                    "current_phase": "failed",
-                    "end_time": datetime.utcnow().isoformat(),
-                    "error": "Backend restarted before this scan completed; job recovery is not enabled yet.",
+                    "status": "interrupted",
+                    "error": (
+                        "API process restarted. Completed runner actions and evidence were retained; "
+                        "the operation requires an operator resume from its last checkpoint."
+                    ),
                 })
                 self._store.upsert_scan(scan_id, scan)
             self._findings.setdefault(scan_id, [])
@@ -149,10 +159,15 @@ class ScanManager:
                 continue
         self._scan_id_counter = highest_counter
 
-    def subscribe_events(self) -> asyncio.Queue:
+    def subscribe_events(self, after_sequence: int = 0) -> asyncio.Queue:
         """Subscribe to scan events. Returns a queue for SSE streaming."""
         queue = asyncio.Queue(maxsize=500)
-        for event in self._event_history[-200:]:
+        replay = (
+            self._store.load_events_after(after_sequence, limit=500)
+            if after_sequence > 0
+            else self._event_history[-200:]
+        )
+        for event in replay:
             try:
                 queue.put_nowait(self._display_event(event))
             except asyncio.QueueFull:
@@ -186,6 +201,50 @@ class ScanManager:
         """Compile evidence-backed paths without promoting hypotheses to findings."""
         result = compile_attack_chains(self._findings.get(scan_id, []))
         return {"scan_id": scan_id, **result}
+
+    def get_operation(self, scan_id: str) -> dict[str, Any]:
+        """Return the durable, reconnectable execution ledger for one assessment."""
+        actions = self._store.load_durable_actions(scan_id)
+        events = self._store.load_events(scan_id, limit=200)
+        statuses: dict[str, int] = defaultdict(int)
+        for action in actions:
+            statuses[str(action.get("status") or "unknown")] += 1
+        sequence = max((int(event.get("sequence") or 0) for event in events), default=0)
+        scan = self._scans.get(scan_id, {})
+        return {
+            "operation_id": f"operation_{scan_id}",
+            "scan_id": scan_id,
+            "status": scan.get("status", "unknown"),
+            "current_phase": scan.get("current_phase", ""),
+            "reconnect_cursor": sequence,
+            "summary": {
+                "total_actions": len(actions),
+                "running": statuses.get("running", 0),
+                "completed": statuses.get("completed", 0),
+                "partial": statuses.get("partial", 0),
+                "retrying": statuses.get("retrying", 0),
+                "failed": statuses.get("failed", 0) + statuses.get("timed_out", 0),
+            },
+            "actions": actions,
+            "events": [self._display_event(event) for event in events],
+            "recovery": {
+                "durable_results": True,
+                "event_replay": True,
+                "operator_resume_required": scan.get("status") == "interrupted",
+            },
+        }
+
+    def get_control_evidence(self, scan_id: str) -> dict[str, Any]:
+        return {
+            "scan_id": scan_id,
+            **build_control_evidence(
+                scan=self._scans.get(scan_id, {}),
+                coverage=self.get_scan_coverage(scan_id),
+                findings=self._findings.get(scan_id, []),
+                assets=self._store.load_assets(scan_id),
+                actions=self._store.load_durable_actions(scan_id),
+            ),
+        }
 
     async def _record_adaptive_decision(self, scan_id: str, phase: str) -> None:
         orchestrator = self._orchestrators.get(scan_id)
@@ -311,12 +370,14 @@ class ScanManager:
             "timestamp": event.timestamp,
             **event.data,
         }
+        if persist:
+            sequence = await self._store.append_event_async(payload)
+            payload["sequence"] = sequence
         display_payload = self._display_event(payload)
         if persist:
             self._event_history.append(display_payload)
             if len(self._event_history) > 1000:
                 self._event_history = self._event_history[-1000:]
-            await self._store.append_event_async(payload)
         dead_queues = []
         for queue in self._events:
             try:
@@ -460,15 +521,31 @@ class ScanManager:
 
         Returns True if the finding is a duplicate and should be skipped.
         """
-        key = (finding.title.lower().strip(), self._canonical_finding_target(
+        target_key = self._canonical_finding_target(
             finding.target.url or finding.target.base_url or finding.target.host
-        ))
+        )
+        cves = {str(value).upper() for value in finding.cve_ids if str(value).strip()}
+        title = re.sub(
+            r"^(cms vulnerability|potential vulnerability|vulnerability)\s*:\s*",
+            "",
+            finding.title.lower().strip(),
+        )
+        key = ("cve", tuple(sorted(cves)), target_key.split("/", 1)[0]) if cves else ("title", title, target_key)
         for existing_f in existing:
+            existing_target = self._canonical_finding_target(
+                existing_f.get("target_url") or existing_f.get("target_host") or ""
+            )
+            existing_cves = {
+                str(value).upper() for value in (existing_f.get("cve_ids") or []) if str(value).strip()
+            }
+            existing_title = re.sub(
+                r"^(cms vulnerability|potential vulnerability|vulnerability)\s*:\s*",
+                "",
+                str(existing_f.get("title") or "").lower().strip(),
+            )
             existing_key = (
-                existing_f.get("title", "").lower().strip(),
-                self._canonical_finding_target(
-                    existing_f.get("target_url") or existing_f.get("target_host") or ""
-                ),
+                ("cve", tuple(sorted(existing_cves)), existing_target.split("/", 1)[0])
+                if existing_cves else ("title", existing_title, existing_target)
             )
             if existing_key == key:
                 return True

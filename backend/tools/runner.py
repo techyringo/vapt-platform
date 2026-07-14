@@ -25,6 +25,7 @@ Call validate_shared_dir() at startup to catch misconfiguration early.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import shutil
@@ -33,6 +34,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
+from uuid import uuid4
 
 from loguru import logger
 
@@ -526,6 +528,28 @@ class DockerRunner:
         """Submit tool execution to the ARQ worker queue."""
         started = time.monotonic()
         job: Any = None
+        action_id = f"action_{uuid4().hex}"
+        scan_id = current_scan_id.get()
+        log_context = dict(tool_log_context.get() or {})
+        phase = str(log_context.get("phase") or "")
+        action_store = self._action_store()
+        input_hash = hashlib.sha256(json.dumps({
+            "tool": tool_name,
+            "args": args,
+            "input_sha256": hashlib.sha256((input_data or "").encode()).hexdigest(),
+            "cwd": cwd or "",
+        }, sort_keys=True, default=str).encode()).hexdigest()
+        action_store.create_durable_action({
+            "action_id": action_id,
+            "scan_id": scan_id,
+            "phase": phase,
+            "capability": str(log_context.get("capability") or tool_name),
+            "tool": tool_name,
+            "idempotency_key": action_id,
+            "input_hash": input_hash,
+            "reason": str(log_context.get("reason") or "Policy-approved scan workflow action")[:1000],
+            "runner": "arq",
+        })
         try:
             tool_config = self._config.get_tool_config(tool_name)
             effective_timeout = timeout or tool_config.timeout
@@ -540,11 +564,12 @@ class DockerRunner:
                     queue=ARQ_QUEUE_NAME,
                     tool=tool_name,
                 )
-                return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+                result = await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+                self._complete_action(action_store, action_id, result, runner="local-fallback")
+                return result
 
             # Forward the live-log context so the worker can stream this tool's
             # output back to the API's SSE clients (cross-process).
-            log_context = dict(tool_log_context.get() or {})
             # Queue wait is not tool runtime. Under a busy two-worker scan a
             # job can legitimately wait several minutes before its own
             # execution timeout starts. Give ARQ a separate queue grace so
@@ -560,12 +585,23 @@ class DockerRunner:
                 env,
                 cwd,
                 log_context,
+                action_id,
                 _queue_name=ARQ_QUEUE_NAME,
+                _job_id=action_id,
                 _expires=effective_timeout + queue_grace,
             )
             if job is None:
-                logger.warning("[worker] Duplicate job for {tool} — running locally", tool=tool_name)
-                return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+                recovered = await self._recover_action_result(action_store, action_id, wait_seconds=2)
+                if recovered is not None:
+                    return recovered
+                action_store.update_durable_action(action_id, {
+                    "status": "failed", "error": "Queue rejected the action id",
+                    "completed_at": self._utc_now(),
+                })
+                return ToolResult(
+                    tool_name=tool_name, exit_code=-1, stdout="",
+                    stderr="Queue rejected the idempotent action; safe retry is available.", duration=0.0,
+                )
 
             # Register the in-flight job so the orchestrator can drain/abort it
             # (prevents orphaned jobs from running past the report barrier).
@@ -578,7 +614,17 @@ class DockerRunner:
 
             if isinstance(result_data, dict):
                 return ToolResult.from_dict(result_data)
-            return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+            recovered = await self._recover_action_result(action_store, action_id, wait_seconds=2)
+            if recovered is not None:
+                return recovered
+            action_store.update_durable_action(action_id, {
+                "status": "failed", "error": "Worker returned no structured result",
+                "completed_at": self._utc_now(),
+            })
+            return ToolResult(
+                tool_name=tool_name, exit_code=-1, stdout="",
+                stderr="Worker returned no structured result; safe retry is available.", duration=time.monotonic() - started,
+            )
 
         except asyncio.CancelledError:
             # The awaiting agent was cancelled (agent timeout or scan cancel).
@@ -588,9 +634,22 @@ class DockerRunner:
             raise
         except asyncio.TimeoutError as exc:
             duration = time.monotonic() - started
+            recovered = await self._recover_action_result(action_store, action_id, wait_seconds=3)
+            if recovered is not None:
+                self._unregister_job(job)
+                logger.warning(
+                    "[worker] Recovered durable result for {tool} after ARQ result timeout",
+                    tool=tool_name,
+                )
+                return recovered
             # The result never arrived in time; the job may still be executing.
             # Abort it so it cannot orphan, then report the timeout.
             await self._abort_job(job)
+            action_store.update_durable_action(action_id, {
+                "status": "retrying",
+                "error": f"ARQ result timeout after {duration:.1f}s; worker action aborted",
+                "completed_at": self._utc_now(),
+            })
             logger.warning(
                 "[worker] ARQ job timed out waiting for {tool} after {dur:.1f}s "
                 "({err_type}: {err!r}) — aborted worker job, not duplicating locally",
@@ -612,6 +671,15 @@ class DockerRunner:
                 timeout_reason="ARQ result timeout — worker job aborted",
             )
         except Exception as exc:
+            recovered = await self._recover_action_result(action_store, action_id, wait_seconds=3)
+            if recovered is not None:
+                self._unregister_job(job)
+                logger.warning(
+                    "[worker] Recovered durable result for {tool} after {kind}",
+                    tool=tool_name,
+                    kind=type(exc).__name__,
+                )
+                return recovered
             # Unknown failure. Abort any in-flight job before the local fallback
             # so we never run the same tool twice concurrently.
             await self._abort_job(job)
@@ -620,7 +688,46 @@ class DockerRunner:
                 err_type=type(exc).__name__,
                 err=exc,
             )
-            return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+            result = await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+            self._complete_action(action_store, action_id, result, runner="local-recovery")
+            return result
+
+    def _action_store(self):
+        from database.store import PersistenceStore
+
+        return PersistenceStore(self._config.database.url)
+
+    @staticmethod
+    def _utc_now() -> str:
+        from datetime import datetime, timezone
+
+        return datetime.now(timezone.utc).isoformat()
+
+    @classmethod
+    def _complete_action(cls, store: Any, action_id: str, result: ToolResult, *, runner: str) -> None:
+        store.update_durable_action(action_id, {
+            "status": result.outcome,
+            "runner": runner,
+            "result": result.to_dict(),
+            "error": result.stderr[-2000:] if not result.success else "",
+            "heartbeat_at": cls._utc_now(),
+            "completed_at": cls._utc_now(),
+        })
+
+    @staticmethod
+    async def _recover_action_result(store: Any, action_id: str, *, wait_seconds: float) -> Optional[ToolResult]:
+        """Recover a worker result from SQLite when Redis loses the return message."""
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            action = await asyncio.to_thread(store.load_durable_action, action_id)
+            result = action.get("result") if isinstance(action, dict) else None
+            if isinstance(result, dict) and result.get("tool") and action.get("status") in {
+                "completed", "partial", "timed_out", "resource_exhausted", "failed",
+            }:
+                return ToolResult.from_dict(result)
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.25)
 
     # ── Job tracking helpers (report barrier / abort-on-timeout) ────────────
 

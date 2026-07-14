@@ -9,6 +9,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any, Optional
+from datetime import datetime, timezone
 
 from loguru import logger
 
@@ -30,6 +31,7 @@ async def execute_tool(
     env: Optional[dict[str, str]] = None,
     cwd: Optional[str] = None,
     log_context: Optional[dict[str, Any]] = None,
+    action_id: Optional[str] = None,
 ) -> dict[str, Any]:
     """Execute a security tool inside a Docker container (or directly).
 
@@ -58,11 +60,28 @@ async def execute_tool(
         tool_log_context.set(dict(log_context))
 
     runner: DockerRunner = ctx.get("runner")
+    config = ctx.get("config")
     if runner is None:
         # Fallback: build a fresh runner from config in context
         from core.config import AppConfig
-        config: AppConfig = ctx.get("config") or AppConfig()
+        config = config or AppConfig()
         runner = DockerRunner(config, use_queue=False)
+
+    store = None
+    now = datetime.now(timezone.utc).isoformat()
+    if action_id:
+        try:
+            from core.config import AppConfig
+            from database.store import PersistenceStore
+
+            config = config or AppConfig()
+            store = PersistenceStore(config.database.url)
+            store.update_durable_action(action_id, {
+                "status": "running", "started_at": now, "heartbeat_at": now,
+                "runner": "arq-worker", "error": "",
+            })
+        except Exception as exc:
+            logger.warning("[worker] Could not mark durable action {action}: {err}", action=action_id, err=exc)
 
     logger.info(
         "[worker] Executing tool={tool} cmd={cmd}",
@@ -78,10 +97,25 @@ async def execute_tool(
             env=env,
             cwd=cwd,
         )
-        return result.to_dict()
+        payload = result.to_dict()
+        if store is not None and action_id:
+            finished = datetime.now(timezone.utc).isoformat()
+            store.update_durable_action(action_id, {
+                "status": result.outcome,
+                "result": payload,
+                "error": result.stderr[-2000:] if not result.success else "",
+                "heartbeat_at": finished,
+                "completed_at": finished,
+                "checkpoint": {
+                    "tool": tool_name,
+                    "outcome": result.outcome,
+                    "evidence_captured": result.success or result.partial,
+                },
+            })
+        return payload
     except Exception as exc:
         logger.error("[worker] Tool {tool} raised: {err}", tool=tool_name, err=exc)
-        return {
+        payload = {
             "tool": tool_name,
             "exit_code": -1,
             "success": False,
@@ -90,6 +124,13 @@ async def execute_tool(
             "stdout": "",
             "stderr": str(exc),
         }
+        if store is not None and action_id:
+            finished = datetime.now(timezone.utc).isoformat()
+            store.update_durable_action(action_id, {
+                "status": "failed", "result": payload, "error": str(exc)[:2000],
+                "heartbeat_at": finished, "completed_at": finished,
+            })
+        return payload
 
 
 async def pull_tool_images(

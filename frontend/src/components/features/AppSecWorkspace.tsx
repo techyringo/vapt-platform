@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
-  AlertTriangle, ArrowRight, CheckCircle2, Code2, ExternalLink,
+  AlertTriangle, ArrowRight, CheckCircle2, Code2, Download, ExternalLink,
   FileCode2, GitBranch, KeyRound, PackageSearch, Play, RefreshCw,
   SearchCode, ShieldCheck, XCircle,
 } from 'lucide-react';
@@ -186,7 +186,19 @@ export function AppSecWorkspace() {
                   <h3>{detail.name}</h3>
                   <a href={detail.repository} target="_blank" rel="noreferrer">{shortRepository(detail.repository)} <ExternalLink size={12} /></a>
                 </div>
-                {running && <div className="appsec-active"><RefreshCw size={14} className="animate-spin" /><span>{detail.phase.replace(/_/g, ' ')}</span><strong>{detail.progress}%</strong></div>}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {running && <div className="appsec-active"><RefreshCw size={14} className="animate-spin" /><span>{detail.phase.replace(/_/g, ' ')}</span><strong>{detail.progress}%</strong></div>}
+                  {!running && (
+                    <a className="btn btn-secondary" href={api.downloadAppSecSarif(detail.assessment_id)}>
+                      <Download size={14} />SARIF
+                    </a>
+                  )}
+                  {!running && detail.artifacts?.some(item => item.kind === 'sbom') && (
+                    <a className="btn btn-secondary" href={api.downloadAppSecArtifact(detail.assessment_id, 'sbom')}>
+                      <Download size={14} />SBOM
+                    </a>
+                  )}
+                </div>
               </header>
 
               <div className="appsec-metrics">
@@ -196,6 +208,19 @@ export function AppSecWorkspace() {
                 <Metric label="Coverage lanes" value={`${Object.values(detail.coverage || {}).filter(item => item.status === 'completed').length}/3`} tone="cyan" />
               </div>
 
+              {detail.summary?.diff && (
+                <div className="appsec-diff" aria-label="Baseline comparison">
+                  <div>
+                    <span className="section-label">Scan diff</span>
+                    <strong>{detail.summary.diff.has_baseline ? 'Compared with previous assessment' : 'First baseline captured'}</strong>
+                    {detail.summary.baseline_assessment_id && <small>{detail.summary.baseline_assessment_id}</small>}
+                  </div>
+                  <div><span>New</span><strong className="new">{detail.summary.diff.new}</strong></div>
+                  <div><span>Unchanged</span><strong>{detail.summary.diff.unchanged}</strong></div>
+                  <div><span>Resolved</span><strong className="resolved">{detail.summary.diff.resolved}</strong></div>
+                </div>
+              )}
+
               <div className="appsec-lanes">
                 {Object.entries(laneMeta).map(([key, meta]) => {
                   const state = detail.coverage?.[key] || { status: 'planned', tool: key };
@@ -203,7 +228,7 @@ export function AppSecWorkspace() {
                   const profile = key === 'sast' && state.languages
                     ? `${state.scanned_files ?? state.source_files ?? state.files ?? '?'} analyzed · ${Object.keys(state.languages).slice(0, 4).join(', ')}`
                     : key === 'sca' && state.manifests?.length
-                      ? `${state.manifests.length} manifest${state.manifests.length === 1 ? '' : 's'}`
+                      ? `${state.manifests.length} manifest${state.manifests.length === 1 ? '' : 's'}${state.sbom?.components !== undefined ? ` · ${state.sbom.components} SBOM components` : ''}`
                       : state.verification || '';
                   return (
                     <article className={`appsec-lane ${statusTone(state.status)}`} key={key}>

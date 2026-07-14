@@ -231,6 +231,48 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
                 "summary": _summary(findings, unavailable_now),
             })
 
+        # Produce a complete CycloneDX inventory separately from the
+        # vulnerability-only normalized finding set. This remains an artifact,
+        # not a finding count, so a clean SBOM is never presented as proof that
+        # dependencies are vulnerability-free.
+        tool_log_context.set({"scan_id": assessment_id, "agent": "appsec", "phase": "sbom"})
+        sbom_result = await runner.run_local(
+            "trivy",
+            [
+                "fs", "--cache-dir", f"{CONTAINER_SHARED_DIR}/trivy-cache",
+                "--format", "cyclonedx", "--scanners", "vuln", "--quiet",
+                container_workspace,
+            ],
+            timeout=900,
+        )
+        store.append_appsec_run(assessment_id, "sbom", sbom_result.to_dict())
+        sbom_state: dict[str, object] = {"status": "unavailable"}
+        if sbom_result.stdout.strip():
+            try:
+                sbom_payload = _json_payload(sbom_result.stdout)
+                if sbom_payload.get("bomFormat") == "CycloneDX":
+                    artifact = store.save_appsec_artifact(
+                        assessment_id,
+                        kind="sbom",
+                        format="cyclonedx-json",
+                        filename=f"{assessment_id}.cdx.json",
+                        content=json.dumps(sbom_payload, indent=2, ensure_ascii=True),
+                    )
+                    sbom_state = {
+                        "status": "completed",
+                        "components": len(sbom_payload.get("components") or []),
+                        "format": "CycloneDX JSON",
+                        "sha256": artifact["sha256"],
+                        "size": artifact["size"],
+                    }
+            except Exception as exc:
+                sbom_state = {"status": "partial", "limitation": f"Invalid CycloneDX output: {exc}"}
+        elif sbom_result.success:
+            sbom_state = {"status": "partial", "limitation": "Trivy returned no CycloneDX document."}
+        else:
+            sbom_state = {"status": "unavailable", "limitation": (sbom_result.stderr or "SBOM generation failed")[-500:]}
+        coverage["sca"]["sbom"] = sbom_state
+
         lane = "secrets"
         report_path = workspace / "gitleaks.json"
         container_report = f"{container_workspace}/gitleaks.json"
@@ -288,12 +330,16 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         store.replace_appsec_findings(assessment_id, findings)
         unavailable = [lane for lane, state in coverage.items() if state["status"] in {"unavailable", "partial"}]
         status = "partial" if unavailable else "completed"
+        baseline = store.load_previous_appsec_assessment(repository, exclude_id=assessment_id)
+        summary = _summary(findings, unavailable)
+        summary["diff"] = assessment_diff(findings, (baseline or {}).get("findings") or [])
+        summary["baseline_assessment_id"] = (baseline or {}).get("assessment_id", "")
         store.update_appsec_assessment(assessment_id, {
             "status": status,
             "phase": "complete",
             "progress": 100,
             "coverage": coverage,
-            "summary": _summary(findings, unavailable),
+            "summary": summary,
         })
         return {"assessment_id": assessment_id, "status": status, "findings": len(findings)}
     except Exception as exc:
@@ -315,3 +361,86 @@ def _summary(findings: list[dict], unavailable: list[str]) -> dict:
         category = finding.get("category", "other")
         categories[category] = categories.get(category, 0) + 1
     return {"total": len(findings), "severities": severities, "categories": categories, "unavailable": unavailable}
+
+
+def assessment_diff(current: list[dict], baseline: list[dict]) -> dict[str, object]:
+    """Compare stable fingerprints without changing finding verification state."""
+    current_ids = {str(item.get("fingerprint") or "") for item in current if item.get("fingerprint")}
+    baseline_ids = {str(item.get("fingerprint") or "") for item in baseline if item.get("fingerprint")}
+    return {
+        "new": len(current_ids - baseline_ids),
+        "unchanged": len(current_ids & baseline_ids),
+        "resolved": len(baseline_ids - current_ids),
+        "new_fingerprints": sorted(current_ids - baseline_ids)[:200],
+        "resolved_fingerprints": sorted(baseline_ids - current_ids)[:200],
+        "has_baseline": bool(baseline),
+    }
+
+
+def assessment_to_sarif(assessment: dict) -> dict:
+    """Export normalized code findings as interoperable SARIF 2.1.0."""
+    findings = assessment.get("findings") or []
+    rules: dict[str, dict] = {}
+    results: list[dict] = []
+    level_map = {
+        "critical": "error", "high": "error", "medium": "warning",
+        "low": "note", "informational": "note",
+    }
+    for finding in findings:
+        rule_id = str(finding.get("rule_id") or "vapt-observation")
+        rules.setdefault(rule_id, {
+            "id": rule_id,
+            "name": rule_id,
+            "shortDescription": {"text": str(finding.get("title") or rule_id)[:1000]},
+            "help": {"text": str(finding.get("remediation") or "Review and remediate the security observation.")[:4000]},
+            "properties": {
+                "source": finding.get("source", ""),
+                "category": finding.get("category", ""),
+                "cwe": finding.get("cwe_ids") or [],
+            },
+        })
+        result: dict[str, object] = {
+            "ruleId": rule_id,
+            "level": level_map.get(str(finding.get("severity") or "informational"), "note"),
+            "message": {"text": str(finding.get("description") or finding.get("title") or rule_id)[:4000]},
+            "partialFingerprints": {"vaptFingerprint": finding.get("fingerprint", "")},
+            "properties": {
+                "severity": finding.get("severity", "informational"),
+                "confidence": finding.get("confidence", "medium"),
+                "verificationStatus": finding.get("status", "candidate"),
+                "cve": finding.get("cve_ids") or [],
+            },
+        }
+        if finding.get("path"):
+            region: dict[str, int] = {}
+            if finding.get("start_line"):
+                region["startLine"] = int(finding["start_line"])
+            if finding.get("end_line"):
+                region["endLine"] = int(finding["end_line"])
+            result["locations"] = [{
+                "physicalLocation": {
+                    "artifactLocation": {"uri": str(finding["path"])},
+                    **({"region": region} if region else {}),
+                }
+            }]
+        results.append(result)
+    return {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {
+                "driver": {
+                    "name": "VAPT Platform Unified AppSec",
+                    "informationUri": "https://github.com/techyringo/vapt-platform",
+                    "rules": list(rules.values()),
+                }
+            },
+            "automationDetails": {"id": assessment.get("assessment_id", "")},
+            "versionControlProvenance": [{
+                "repositoryUri": assessment.get("repository", ""),
+                "revisionId": assessment.get("commit_sha", ""),
+                "branch": assessment.get("ref", ""),
+            }],
+            "results": results,
+        }],
+    }

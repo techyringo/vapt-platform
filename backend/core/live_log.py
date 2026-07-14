@@ -79,6 +79,20 @@ def prepare_tool_log_line(line: str, tool: str = "") -> str:
     try:
         payload = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
+        structured_tools = {"semgrep", "trivy", "nuclei", "gitleaks", "trufflehog"}
+        looks_like_json_fragment = bool(
+            raw[:1] in {"{", "[", "}", "]"}
+            or re.match(r'^"[A-Za-z0-9_.-]+"\s*:', raw)
+            or raw.endswith((",", "},", "],"))
+        )
+        looks_like_response_body = bool(
+            re.search(r"(?i)<(?:!doctype|html|head|body|script|style)\b", raw)
+            or "-----BEGIN " in raw
+        )
+        if tool.lower() in structured_tools and (
+            looks_like_json_fragment or looks_like_response_body or len(raw) > 800
+        ):
+            return ""
         # Katana can emit entire minified response bodies as one line. Those
         # belong in the downloadable artifact, not the operational event feed.
         if len(raw) > 800 and tool.lower() in {"katana", "hakrawler", "gau", "waybackurls"}:

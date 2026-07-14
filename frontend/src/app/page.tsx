@@ -10,6 +10,7 @@ import {
   CheckCircle2,
   ChevronRight,
   CircleStop,
+  ClipboardCheck,
   Download,
   FileText,
   LayoutDashboard,
@@ -29,7 +30,7 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentDecision, AgentStatus, AssetGraph, AttackChainResult, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentDecision, AgentStatus, AssetGraph, AttackChainResult, ControlEvidence, DurableOperation, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -56,7 +57,7 @@ import { LLMConfigPanel } from '@/components/features/LLMConfigPanel';
 import { AppSecWorkspace } from '@/components/features/AppSecWorkspace';
 
 /* ─── Types ─────────────────────────────────────────────── */
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
+type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
 type SeverityFilter = SeverityKey | 'all';
 const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
 
@@ -215,7 +216,9 @@ export default function Dashboard() {
   const [findings,       setFindings]       = useState<Finding[]>([]);
 	  const [agentStatus,    setAgentStatus]    = useState<Record<string, AgentStatus>>({});
 	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
+	  const [operation,      setOperation]      = useState<DurableOperation | null>(null);
 	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
+  const [controlEvidence, setControlEvidence] = useState<ControlEvidence | null>(null);
   const [assetGraph,      setAssetGraph]      = useState<AssetGraph | null>(null);
   const [decisions,      setDecisions]      = useState<AgentDecision[]>([]);
   const [attackChains,   setAttackChains]   = useState<AttackChainResult | null>(null);
@@ -351,6 +354,8 @@ export default function Dashboard() {
       if (event.scan_id && event.scan_id === selectedScanIdRef.current) {
         api.getAssetGraph(event.scan_id).then(setAssetGraph).catch(() => {});
         api.getToolRuns(event.scan_id).then(r => setToolRuns(r.tool_runs)).catch(() => {});
+        api.getOperation(event.scan_id).then(setOperation).catch(() => {});
+        api.getControlEvidence(event.scan_id).then(setControlEvidence).catch(() => {});
       }
       absorbEvent(event);
       return;
@@ -373,9 +378,11 @@ export default function Dashboard() {
       if (deletedId && deletedId === selectedScanIdRef.current) {
         setSelectedScanId(null);
         setFindings([]);
-      setAgentStatus({});
-      setToolRuns([]);
-      setAssetGraph(null);
+        setAgentStatus({});
+        setToolRuns([]);
+        setOperation(null);
+        setControlEvidence(null);
+        setAssetGraph(null);
       }
       absorbEvent(event);
       return;
@@ -439,7 +446,9 @@ export default function Dashboard() {
 	    setFindings([]);
 	    setAgentStatus({});
 	    setToolRuns([]);
+	    setOperation(null);
 	    setCoverage(null);
+	    setControlEvidence(null);
 	    setAssetGraph(null);
 	    setDecisions([]);
 	    setAttackChains(null);
@@ -448,15 +457,19 @@ export default function Dashboard() {
 	      api.getFindings(selectedScan.scan_id),
 	      api.getAgentStatus(selectedScan.scan_id),
 	      api.getToolRuns(selectedScan.scan_id),
+	      api.getOperation(selectedScan.scan_id),
 	      api.getCoverage(selectedScan.scan_id),
+	      api.getControlEvidence(selectedScan.scan_id),
 	      api.getAssetGraph(selectedScan.scan_id),
 	      api.getDecisions(selectedScan.scan_id),
 	      api.getAttackChains(selectedScan.scan_id),
-	    ]).then(([findingsRes, agentRes, toolRunRes, coverageRes, assetRes, decisionsRes, chainsRes]) => {
+	    ]).then(([findingsRes, agentRes, toolRunRes, operationRes, coverageRes, controlRes, assetRes, decisionsRes, chainsRes]) => {
 	      if (findingsRes.status === 'fulfilled') setFindings(findingsRes.value.findings);
 	      if (agentRes.status === 'fulfilled')    setAgentStatus(agentRes.value.agents);
 	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
+	      if (operationRes.status === 'fulfilled') setOperation(operationRes.value);
 	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	      if (controlRes.status === 'fulfilled') setControlEvidence(controlRes.value);
 	      if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	      if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	      if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
@@ -483,13 +496,17 @@ export default function Dashboard() {
 	    const loadToolRuns = () => {
 	      Promise.allSettled([
 	        api.getToolRuns(selectedScan.scan_id),
+	        api.getOperation(selectedScan.scan_id),
 	        api.getCoverage(selectedScan.scan_id),
+	        api.getControlEvidence(selectedScan.scan_id),
 	        api.getAssetGraph(selectedScan.scan_id),
 	        api.getDecisions(selectedScan.scan_id),
 	        api.getAttackChains(selectedScan.scan_id),
-	      ]).then(([toolRunRes, coverageRes, assetRes, decisionsRes, chainsRes]) => {
+	      ]).then(([toolRunRes, operationRes, coverageRes, controlRes, assetRes, decisionsRes, chainsRes]) => {
 	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
+	        if (operationRes.status === 'fulfilled') setOperation(operationRes.value);
 	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
+	        if (controlRes.status === 'fulfilled') setControlEvidence(controlRes.value);
 	        if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	        if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	        if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
@@ -635,11 +652,20 @@ export default function Dashboard() {
   );
   const quarantinedCount = useMemo(() => findings.filter(f => f.quarantined).length, [findings]);
   const verifiedFindings = useMemo(
-    () => findings.filter(f => f.status === 'confirmed' && !f.quarantined),
+    () => findings.filter(f => {
+      const tags = new Set((f.tags || []).map(tag => tag.toLowerCase()));
+      const replayProof = Boolean(f.request_proof && f.response_proof);
+      const independentProof = tags.has('dast-proof') || tags.has('provider-verified') || tags.has('replay-proof');
+      return f.status === 'confirmed' && !f.quarantined && (replayProof || independentProof);
+    }),
     [findings],
   );
   const candidateFindings = Math.max(0, findings.length - verifiedFindings.length);
   const surfaceCount = assetGraph?.total_assets || 0;
+  const mappedSurfaceAssets = useMemo(
+    () => (assetGraph?.assets || []).filter(asset => ['domain', 'subdomain', 'service', 'technology', 'api_endpoint', 'url'].includes(asset.asset_type)).slice(0, 24),
+    [assetGraph?.assets],
+  );
 
   const priorityFindings   = [...verifiedFindings, ...sortedFindings.filter(item => !verifiedFindings.includes(item))].slice(0, 8);
   const agentEntries       = useMemo(() => Object.entries(agentStatus), [agentStatus]);
@@ -752,7 +778,8 @@ export default function Dashboard() {
     { id: 'nav-dashboard', group: 'Navigate', label: 'Assessments', sub: 'Authorised scopes and live execution', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview scan dast', run: () => setActiveTab('dashboard') },
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
     { id: 'nav-agents', group: 'Navigate', label: 'Attack Paths', sub: 'Evidence chains and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence', run: () => setActiveTab('agents') },
-    { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['4'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
+    { id: 'nav-govern', group: 'Navigate', label: 'Control Evidence', sub: 'Versioned controls backed by scan artifacts', icon: ClipboardCheck, hint: ['4'], keywords: 'compliance evidence controls audit', run: () => setActiveTab('govern') },
+    { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['5'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
       id: 'act-new-scan', group: 'Actions', label: 'New assessment', sub: 'Define an authorised scope', icon: Play, keywords: 'start run target',
       run: () => { setActiveTab('dashboard'); if (targetInput.trim()) startScan(); },
@@ -890,7 +917,7 @@ export default function Dashboard() {
                 {/* KPI cards */}
                 <section className="kpi-grid">
                   <MetricCard icon={Activity}      label="Active Assessments" value={activeScans} sub={`${scans.length} total`} tone="cyan" />
-                  <MetricCard icon={ShieldCheck}   label="Verified Findings" value={verifiedFindings.length} sub="report eligible" tone="red" />
+                  <MetricCard icon={ShieldCheck}   label="Behavior-verified" value={verifiedFindings.length} sub="replayable proof" tone="red" />
                   <MetricCard icon={Target}        label="Discovered Surface" value={surfaceCount} sub="durable evidence objects" tone="emerald" />
                   <MetricCard icon={Bug}           label="Candidate Leads" value={candidateFindings} sub="requires validation" tone="amber" />
                 </section>
@@ -1005,6 +1032,44 @@ export default function Dashboard() {
                           );
                         })}
                       </div>
+
+                      {operation && (
+                        <div className="durable-operation" aria-label="Durable operation status">
+                          <div className="durable-operation-head">
+                            <div>
+                              <span className="section-label">Durable action ledger</span>
+                              <p>
+                                Results survive runner disconnects · replay cursor {operation.reconnect_cursor || '—'}
+                              </p>
+                            </div>
+                            <div className="durable-operation-summary">
+                              <span>{operation.summary.completed} completed</span>
+                              {operation.summary.running > 0 && <span className="is-running">{operation.summary.running} running</span>}
+                              {operation.summary.partial > 0 && <span className="is-partial">{operation.summary.partial} partial</span>}
+                              {operation.summary.retrying > 0 && <span className="is-retrying">{operation.summary.retrying} retrying</span>}
+                              {operation.summary.failed > 0 && <span className="is-failed">{operation.summary.failed} failed</span>}
+                            </div>
+                          </div>
+                          {operation.actions.length === 0 ? (
+                            <div className="durable-operation-empty">Capability actions appear when the first approved tool is queued.</div>
+                          ) : (
+                            <div className="durable-action-list">
+                              {operation.actions.slice(-5).reverse().map(action => (
+                                <div key={action.action_id} className="durable-action-row">
+                                  <span className={`action-state action-state-${action.status}`} aria-hidden="true" />
+                                  <div>
+                                    <strong>{action.capability || action.tool}</strong>
+                                    <span>{formatPhase(action.phase)} · {action.runner} · attempt {action.attempt}/{action.max_attempts}</span>
+                                  </div>
+                                  <span className={`badge ${action.status === 'completed' ? 'badge-completed' : action.status === 'running' ? 'badge-running' : action.status === 'failed' || action.status === 'timed_out' ? 'badge-failed' : 'badge-idle'}`}>
+                                    {action.status.replaceAll('_', ' ')}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* Scan list */}
                       <div style={{ maxHeight: 200, overflowY: 'auto', display: 'grid', gap: 6, marginBottom: 14 }}>
@@ -1247,6 +1312,43 @@ export default function Dashboard() {
                     <div className="card-glass" style={{ padding: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
                         <div>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Technology & Attack Surface Map</h3>
+                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                            Persisted assets and observed relationships · no inferred decorative nodes
+                          </p>
+                        </div>
+                        <span className="badge badge-informational">{assetGraph?.total_assets || 0} assets · {assetGraph?.total_edges || 0} edges</span>
+                      </div>
+                      {mappedSurfaceAssets.length === 0 ? (
+                        <div className="quiet-empty">The map appears after body-verified discovery evidence is persisted.</div>
+                      ) : (
+                        <div className="surface-map">
+                          <div className="surface-map-nodes">
+                            {mappedSurfaceAssets.map(asset => (
+                              <div className={`surface-node surface-node-${asset.asset_type}`} key={asset.asset_key}>
+                                <span>{asset.asset_type.replaceAll('_', ' ')}</span>
+                                <strong title={asset.value}>{asset.value}</strong>
+                                <small>{asset.source} · {asset.confidence}</small>
+                              </div>
+                            ))}
+                          </div>
+                          <div className="surface-map-edges">
+                            {(assetGraph?.edges || []).slice(0, 12).map(edge => (
+                              <div key={edge.edge_key}>
+                                <code>{edge.source_key}</code>
+                                <span>{edge.relation.replaceAll('_', ' ')} →</span>
+                                <code>{edge.target_key}</code>
+                              </div>
+                            ))}
+                            {!assetGraph?.edges?.length && <div className="quiet-empty">Assets are real; relationship evidence has not been captured yet.</div>}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    <div className="card-glass" style={{ padding: 14 }}>
+                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+                        <div>
                           <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Decision Ledger</h3>
                           <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
                             Approved recommendations paired with observed execution outcomes
@@ -1255,7 +1357,7 @@ export default function Dashboard() {
                         <span className="badge badge-informational">{decisions.length} entr{decisions.length === 1 ? 'y' : 'ies'}</span>
                       </div>
                       {decisions.length === 0 ? (
-                        <div className="quiet-empty">Recommendations appear as each phase begins. They are recorded for review and are not silently executed.</div>
+                        <div className="quiet-empty">Policy decisions appear as evidence becomes available; only the approved capability set can enter the execution queue.</div>
                       ) : (
                         <div className="coverage-list">
                           {[...decisions].reverse().slice(0, 6).map(decision => (
@@ -1279,7 +1381,7 @@ export default function Dashboard() {
                       )}
                       {decisions.length > 0 && (
                         <div className="quiet-empty" style={{ marginTop: 10 }}>
-                          Policy owns execution. AI ranks only eligible actions; every real run and recovery recommendation is written back here.
+                          Policy owns execution. AI ranks only eligible actions; the selected allowlist and every real outcome are written back here.
                         </div>
                       )}
                     </div>
@@ -1423,6 +1525,81 @@ export default function Dashboard() {
                         })}
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+            </section>
+          )}
+
+          {/* ── CONTROL EVIDENCE TAB ──────────────────────── */}
+          {activeTab === 'govern' && (
+            <section>
+              <div className="workspace-heading">
+                <div className="workspace-heading-copy">
+                  <ClipboardCheck size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
+                  <div>
+                    <h2>Control Evidence</h2>
+                    <p>Versioned assessment controls backed only by persisted scope, execution and proof artifacts</p>
+                  </div>
+                </div>
+                {controlEvidence && (
+                  <span className="badge badge-informational">
+                    {controlEvidence.catalog} · v{controlEvidence.catalog_version}
+                  </span>
+                )}
+              </div>
+
+              {!selectedScan ? (
+                <StateView variant="empty" icon={ClipboardCheck} title="No assessment selected" body="Select an assessment to inspect its control evidence." />
+              ) : !controlEvidence ? (
+                <StateView variant="loading" title="Loading control evidence" body="Reading the persisted evidence ledger." />
+              ) : (
+                <div className="control-evidence-stack">
+                  <div className="evidence-disclaimer" role="note">
+                    <ShieldAlert size={16} aria-hidden="true" />
+                    <div>
+                      <strong>Evidence coverage, not a compliance score</strong>
+                      <span>{controlEvidence.disclaimer} Missing evidence is shown explicitly and never converted into a pass.</span>
+                    </div>
+                  </div>
+
+                  <div className="control-summary-grid">
+                    <MetricCard icon={ClipboardCheck} label="Evidence coverage" value={`${controlEvidence.summary.coverage_percent}%`} sub={`${controlEvidence.summary.evidenced} of ${controlEvidence.summary.total} controls`} tone="cyan" />
+                    <MetricCard icon={ShieldCheck} label="Evidenced" value={controlEvidence.summary.evidenced} sub="artifact-backed" tone="emerald" />
+                    <MetricCard icon={ShieldAlert} label="Not evidenced" value={controlEvidence.summary.not_evidenced} sub="requires assessment evidence" tone="amber" />
+                  </div>
+
+                  <div className="card-glass control-ledger">
+                    <div className="control-ledger-head">
+                      <div>
+                        <h3>Evidence ledger</h3>
+                        <p>{selectedScan.name} · {selectedScan.targets.join(', ')}</p>
+                      </div>
+                      <span className="badge badge-idle">claim: coverage evidence only</span>
+                    </div>
+                    <div className="control-list">
+                      {controlEvidence.controls.map(control => (
+                        <article className={`control-row ${control.status}`} key={control.control_id}>
+                          <div className="control-id-block">
+                            <code>{control.control_id}</code>
+                            <span>{control.family}</span>
+                          </div>
+                          <div className="control-body">
+                            <strong>{control.title}</strong>
+                            {control.status === 'evidenced' ? (
+                              <div className="evidence-ref-list">
+                                {control.evidence_refs.slice(0, 8).map(ref => <code key={ref}>{ref}</code>)}
+                              </div>
+                            ) : (
+                              <p>{control.limitation}</p>
+                            )}
+                          </div>
+                          <span className={`badge ${control.status === 'evidenced' ? 'badge-completed' : 'badge-running'}`}>
+                            {control.status === 'evidenced' ? 'evidenced' : 'not evidenced'}
+                          </span>
+                        </article>
+                      ))}
+                    </div>
                   </div>
                 </div>
               )}
