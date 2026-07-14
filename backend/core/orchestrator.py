@@ -33,6 +33,7 @@ from core.state import ScanStateMachine
 from core.scope import ScopeManager
 from core.config import AppConfig
 from core.tool_registry import TOOL_CAPABILITIES, plan_next_tools, target_layers_from_evidence
+from core.runtime_capabilities import executable_tool_names
 from core.job_tracker import JOB_TRACKER, current_scan_id
 from core.live_log import tool_log_context
 
@@ -1342,6 +1343,7 @@ class Orchestrator:
             already_run=self._tools_run,
             phase=phase,
             include_aggressive=include_aggressive,
+            available_tools=executable_tool_names(self._config),
             target_layers=target_layers_from_evidence(self._evidence) or None,
         )
 
