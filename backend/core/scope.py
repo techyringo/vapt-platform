@@ -430,6 +430,26 @@ class ScopeManager:
             for pattern in self._authorised_domains_normalised
         )
 
+    def allows_subdomain_expansion(self, host: str) -> bool:
+        """Return whether active discovery may expand below ``host``.
+
+        An exact target such as ``example.com`` is intentionally exact-host
+        only.  Child-host enumeration is eligible only when the engagement
+        contains an explicit wildcard such as ``*.example.com``.  Keeping
+        this decision in the scope authority prevents recon agents and UI
+        coverage projections from silently widening an engagement.
+        """
+        normalised = self._normalize_domain(str(host or ""))
+        if not normalised:
+            return False
+        for pattern in self._authorised_domains_normalised:
+            if not pattern.startswith("*."):
+                continue
+            base = pattern[2:]
+            if normalised == base or normalised.endswith(f".{base}"):
+                return True
+        return False
+
     def _matches_discovered_domain(self, normalised_host: str) -> bool:
         """Check if a normalised hostname matches any dynamically discovered domain.
 

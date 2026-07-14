@@ -139,7 +139,7 @@ class WorkerSettings:
     max_jobs = _MAX_JOBS
 
     # Max seconds a single job can run before ARQ forcibly cancels it.
-    job_timeout = 1800  # 30 min
+    job_timeout = max(1800, int(os.environ.get("VAPT_ARQ_JOB_TIMEOUT", "7200")))
 
     # Allow the API/orchestrator to abort a *running* job via job.abort().
     # Without this, aborting only cancels not-yet-started jobs, and a slow tool

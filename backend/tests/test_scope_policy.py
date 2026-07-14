@@ -9,6 +9,7 @@ def test_exact_domain_does_not_authorise_subdomain_active_testing():
     assert scope.is_in_scope("https://matters.ai") is True
     assert scope.is_in_scope("https://app.matters.ai") is False
     assert scope.is_discoverable_host("app.matters.ai") is True
+    assert scope.allows_subdomain_expansion("matters.ai") is False
 
 
 def test_wildcard_domain_authorises_subdomains_for_active_testing():
@@ -17,6 +18,7 @@ def test_wildcard_domain_authorises_subdomains_for_active_testing():
     assert scope.is_in_scope("https://matters.ai") is True
     assert scope.is_in_scope("https://app.matters.ai") is True
     assert scope.is_in_scope("https://api.dev.matters.ai") is True
+    assert scope.allows_subdomain_expansion("matters.ai") is True
 
 
 def test_out_of_scope_overrides_wildcard_authorisation():

@@ -5,6 +5,8 @@ import pytest
 from core.adaptive_planner import AdaptivePlanner
 from core.asset_graph import AssetGraphBuilder, canonical_graph_projection, normalize_url
 from core.assurance_coverage import build_assurance_coverage
+from core.models import ScanPhase
+from core.orchestrator import Orchestrator
 
 
 def _config():
@@ -40,6 +42,50 @@ def test_legacy_asset_projection_collapses_crawler_variants():
 
     assert len(urls) == 1
     assert urls[0]["metadata"]["observation_count"] >= 2
+
+
+def test_enum_ports_preserve_nmap_service_product_and_version():
+    builder = AssetGraphBuilder("scan")
+    builder.ingest_task_result(
+        {
+            "ports": {
+                "example.test": [{
+                    "port": 22,
+                    "protocol": "tcp",
+                    "state": "open",
+                    "service": "ssh",
+                    "product": "OpenSSH",
+                    "version": "OpenSSH 9.2p1",
+                }],
+            },
+        },
+        "enum",
+        "example.test",
+    )
+    assets, _ = builder.records()
+    service = next(item for item in assets if item["asset_type"] == "service")
+
+    assert service["value"] == "example.test:22/ssh"
+    assert service["metadata"]["product"] == "OpenSSH"
+    assert service["metadata"]["version"] == "OpenSSH 9.2p1"
+
+
+def test_nmap_port_evidence_activates_service_specific_planning_tokens():
+    orchestrator = object.__new__(Orchestrator)
+    orchestrator._phase_context = {
+        "enum_data": {
+            "ports": {
+                "example.test": [{"port": 22, "service": "ssh"}],
+            },
+        },
+    }
+    orchestrator._evidence = set()
+
+    orchestrator._ingest_evidence_from_phase_context(ScanPhase.ENUMERATION)
+
+    assert "open_port" in orchestrator._evidence
+    assert "service_banner" in orchestrator._evidence
+    assert "ssh_open" in orchestrator._evidence
 
 
 @pytest.mark.asyncio

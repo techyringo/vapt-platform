@@ -69,6 +69,9 @@ class ReconAgent(BaseAgent):
         domain = target.host
         target_url = target.url or target.base_url
         is_ip_target = self._is_ip_address(domain)
+        expand_subdomains = (
+            not is_ip_target and self.scope.allows_subdomain_expansion(domain)
+        )
 
         # Results containers
         all_subdomains: set[str] = set()
@@ -82,7 +85,7 @@ class ReconAgent(BaseAgent):
         # IP/loopback targets do not benefit from CT/subdomain/archive lookups
         # and those calls can block the whole pipeline for minutes.
         subdomain_tasks = []
-        if not is_ip_target:
+        if expand_subdomains:
             if self.config.tools.get("subfinder", AppConfig().get_tool_config("subfinder")).enabled:
                 subdomain_tasks.append(self._run_subfinder(domain))
             if self.config.tools.get("amass", AppConfig().get_tool_config("amass")).enabled:
@@ -90,6 +93,12 @@ class ReconAgent(BaseAgent):
             if self.config.tools.get("assetfinder", AppConfig().get_tool_config("assetfinder")).enabled:
                 subdomain_tasks.append(self._run_assetfinder(domain))
             subdomain_tasks.append(self._query_crtsh(domain))
+        elif not is_ip_target:
+            logger.info(
+                "[RECON] Exact-host scope for {domain}; child-host enumeration is not eligible. "
+                "Use *.{domain} only when subdomains are explicitly authorised.",
+                domain=domain,
+            )
 
         sub_results = await asyncio.gather(*subdomain_tasks, return_exceptions=True)
         for result in sub_results:

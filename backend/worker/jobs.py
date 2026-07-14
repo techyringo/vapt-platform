@@ -96,6 +96,7 @@ async def execute_tool(
             timeout=timeout,
             env=env,
             cwd=cwd,
+            timeout_resolved=True,
         )
         payload = result.to_dict()
         if store is not None and action_id:

@@ -631,6 +631,7 @@ export default function Dashboard() {
       displayName: string;
       state: 'ready' | 'on_demand' | 'blocked';
       reason: string;
+      actionLabel: string;
     };
     type CoverageGroup = {
       label: string;
@@ -656,24 +657,33 @@ export default function Dashboard() {
       const onDemand = tool.availability === 'pullable';
       let state: CoverageItem['state'] = 'blocked';
       let reason = 'No approved local or container adapter is available.';
+      let actionLabel = 'adapter not installed';
       if (ready) {
         state = 'ready';
         reason = `${tool.will_use} adapter is ready.`;
+        actionLabel = 'ready';
         group.ready += 1;
       } else if (onDemand) {
         state = 'on_demand';
         reason = 'Approved image will be pulled only when evidence and policy select this capability.';
+        actionLabel = 'available on demand';
         group.onDemand += 1;
       } else {
         group.blocked += 1;
-        if (tool.availability === 'needs_api_key') reason = 'Credential is required before this provider can run.';
-        else if (tool.availability === 'disabled_by_config') reason = 'Disabled by administrator policy.';
+        if (tool.availability === 'needs_api_key') {
+          reason = 'An external provider credential is required; the platform cannot create this secret.';
+          actionLabel = 'credential required';
+        } else if (tool.availability === 'disabled_by_config') {
+          reason = 'This capability is intentionally disabled by engagement policy.';
+          actionLabel = 'policy disabled';
+        }
       }
       group.items.push({
         name,
         displayName: tool.display_name || name,
         state,
         reason,
+        actionLabel,
       });
     });
     Object.values(groups).forEach(group => group.items.sort((a, b) => a.displayName.localeCompare(b.displayName)));

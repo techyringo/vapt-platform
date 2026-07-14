@@ -125,7 +125,7 @@ class Orchestrator:
         # Keys are evidence tokens from core/tool_registry.py taxonomy.
         self._evidence: set[str] = set()
         self._tools_run: set[str] = set()  # tracks tools already executed
-        self._agent_timeout_seconds = int(os.environ.get("VAPT_AGENT_TIMEOUT_SECONDS", "1800"))
+        self._agent_timeout_seconds = int(os.environ.get("VAPT_AGENT_TIMEOUT_SECONDS", "7200"))
 
         # Callbacks
         self._on_finding_callbacks: list[Callable[[Finding], Any]] = []
@@ -1227,6 +1227,7 @@ class Orchestrator:
             "live_urls":           ["live_url"],
             "dns_records":         ["dns_record"],
             "open_ports":          ["open_port"],
+            "ports":               ["open_port", "service_banner"],
             "services":            ["service_banner"],
             "technologies":        ["technology"],
             "javascript_urls":     ["javascript_url"],
@@ -1303,7 +1304,16 @@ class Orchestrator:
             8161: "service_activemq", 4848: "service_glassfish",
             8500: "service_consul", 2379: "service_etcd",
         }
-        services_list = data.get("services") or []
+        services_raw = data.get("ports") or data.get("port_results") or data.get("services") or []
+        if isinstance(services_raw, dict):
+            services_list = [
+                service
+                for host_services in services_raw.values()
+                for service in (host_services or [])
+                if isinstance(service, dict)
+            ]
+        else:
+            services_list = services_raw
         if isinstance(services_list, list):
             for svc in services_list:
                 if not isinstance(svc, dict):

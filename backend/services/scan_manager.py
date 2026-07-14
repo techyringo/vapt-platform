@@ -671,6 +671,10 @@ class ScanManager:
 
     def _initial_coverage_contract(self, targets: list[str], profile_agents: list[str]) -> dict[str, Any]:
         has_domain = any(not self._is_ip_target(target) for target in targets)
+        has_wildcard_domain = any(
+            str(target or "").strip().lower().removeprefix("http://").removeprefix("https://").startswith("*.")
+            for target in targets
+        )
         has_web = True
         def status(agent: str, applicable: bool = True) -> str:
             if not applicable:
@@ -682,9 +686,12 @@ class ScanManager:
                 "id": "recon_subdomains",
                 "label": "Subdomain discovery",
                 "phase": "recon",
-                "status": status("recon", has_domain),
+                "status": status("recon", has_wildcard_domain),
                 "expected_tools": ["subfinder", "amass", "assetfinder", "crt.sh"],
-                "notes": "Required before saying subdomains were tested.",
+                "notes": (
+                    "Required only when wildcard subdomains are explicitly authorised. "
+                    "Exact-host targets do not expand into child hosts."
+                ),
             },
             {
                 "id": "recon_dns_resolution",

@@ -96,6 +96,74 @@ _arq_pool_lock: Optional[asyncio.Lock] = None
 _ARQ_MAX_CONNECTIONS = int(os.environ.get("VAPT_ARQ_MAX_CONNECTIONS", "50"))
 
 
+# Workload-aware runtime profiles: minimum seconds, seconds per additional
+# input item, and a safety ceiling.  These are execution budgets, not promises
+# that a provider will answer.  Slow external providers remain optional and a
+# hard ceiling prevents a dead process from occupying a worker forever.
+_ADAPTIVE_TIMEOUT_PROFILES: dict[str, tuple[int, int, int]] = {
+    "arjun": (180, 45, 1800),
+    "httpx": (120, 2, 1200),
+    "dnsx": (120, 2, 1200),
+    "nmap": (300, 30, 3600),
+    "naabu": (300, 15, 3600),
+    "nuclei": (300, 15, 3600),
+    "katana": (330, 30, 1800),
+    "gau": (300, 0, 900),
+    "waybackurls": (300, 0, 900),
+}
+
+
+def _input_cardinality(args: list[str], input_data: Optional[str]) -> int:
+    """Estimate independently testable input items for a tool invocation."""
+    candidates = [line.strip() for line in (input_data or "").splitlines() if line.strip()]
+    for flag in ("-l", "-list", "-i", "--input", "--input-file"):
+        try:
+            value = args[args.index(flag) + 1]
+        except (ValueError, IndexError):
+            continue
+        try:
+            path = Path(value)
+            if path.is_file() and path.stat().st_size <= 32 * 1024 * 1024:
+                candidates.extend(
+                    line.strip()
+                    for line in path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    if line.strip()
+                )
+        except OSError:
+            continue
+    return max(1, len(set(candidates)))
+
+
+def adaptive_timeout_seconds(
+    tool_name: str,
+    requested_timeout: int,
+    args: list[str],
+    input_data: Optional[str] = None,
+) -> int:
+    """Return a bounded, workload-aware tool runtime budget.
+
+    A fixed 90/180 second wall clock made archive and parameter discovery fail
+    predictably on larger targets.  Scaling is deterministic and policy-owned;
+    the LLM cannot raise budgets or make an unbounded process.
+    """
+    base = max(1, int(requested_timeout))
+    if os.environ.get("VAPT_ADAPTIVE_TOOL_TIMEOUTS", "true").strip().lower() in {
+        "0", "false", "no", "off",
+    }:
+        return base
+    profile = _ADAPTIVE_TIMEOUT_PROFILES.get(str(tool_name or "").lower())
+    if not profile:
+        return base
+    minimum, seconds_per_extra_item, profile_cap = profile
+    item_count = _input_cardinality(args, input_data)
+    calculated = minimum + max(0, item_count - 1) * seconds_per_extra_item
+    try:
+        global_cap = max(60, int(os.environ.get("VAPT_TOOL_MAX_RUNTIME", "3600")))
+    except ValueError:
+        global_cap = 3600
+    return min(profile_cap, global_cap, max(base, calculated))
+
+
 def _get_semaphore() -> asyncio.Semaphore:
     global _docker_semaphore
     if _docker_semaphore is None:
@@ -488,9 +556,21 @@ class DockerRunner:
         Routes to ARQ worker when REDIS_URL is configured, otherwise
         executes inline (Docker container or direct host command).
         """
+        configured = self._config.get_tool_config(tool_name).timeout
+        effective_timeout = adaptive_timeout_seconds(
+            tool_name, timeout or configured, args, input_data,
+        )
+        if effective_timeout != (timeout or configured):
+            logger.info(
+                "[RuntimeBudget] {tool}: {base}s -> {effective}s for {items} input item(s)",
+                tool=tool_name,
+                base=timeout or configured,
+                effective=effective_timeout,
+                items=_input_cardinality(args, input_data),
+            )
         if self._redis_url:
-            return await self._run_via_worker(tool_name, args, input_data, timeout, env, cwd)
-        return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+            return await self._run_via_worker(tool_name, args, input_data, effective_timeout, env, cwd)
+        return await self._run_local(tool_name, args, input_data, effective_timeout, env, cwd)
 
     async def run_local(
         self,
@@ -500,13 +580,21 @@ class DockerRunner:
         timeout: Optional[int] = None,
         env: Optional[dict[str, str]] = None,
         cwd: Optional[str] = None,
+        *,
+        timeout_resolved: bool = False,
     ) -> ToolResult:
         """Execute locally, bypassing the ARQ queue.
 
         Workers must use this method. Otherwise a worker with REDIS_URL set
         re-enqueues another worker job instead of actually running the tool.
         """
-        return await self._run_local(tool_name, args, input_data, timeout, env, cwd)
+        configured = self._config.get_tool_config(tool_name).timeout
+        effective_timeout = timeout or configured
+        if not timeout_resolved:
+            effective_timeout = adaptive_timeout_seconds(
+                tool_name, effective_timeout, args, input_data,
+            )
+        return await self._run_local(tool_name, args, input_data, effective_timeout, env, cwd)
 
     async def run_parallel(self, commands: list[dict[str, Any]]) -> list[ToolResult]:
         """Execute multiple tools concurrently."""

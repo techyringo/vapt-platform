@@ -284,50 +284,75 @@ class EnumAgent(BaseAgent):
         return all_results
 
     async def _run_param_discovery(self, urls: list[str]) -> list[dict]:
-        """Run arjun for parameter discovery."""
-        results = []
-
+        """Run Arjun in bounded, independently recoverable endpoint batches."""
         if not urls:
-            return results
-
-        from tools.runner import shared_temp_path
-        host_path = shared_temp_path(suffix=".txt")
-        out_path = shared_temp_path(suffix=".json")
-        with open(host_path, "w") as f:
-            f.write("\n".join(urls))
+            return []
 
         try:
-            result = await self._runner.run(
-                tool_name="arjun",
-                args=["-i", host_path, "-o", out_path, "-t", "5"],
-                timeout=max(60, int(os.environ.get("VAPT_ARJUN_TIMEOUT", "180"))),
-            )
-            self._record_tool_run(result, "enumeration")
-            output = ""
-            if os.path.exists(out_path):
-                try:
-                    with open(out_path) as f:
-                        output = f.read()
-                except OSError:
-                    output = ""
-            output = output or result.stdout
-            if (result.success or result.partial) and output.strip():
+            batch_size = max(1, min(10, int(os.environ.get("VAPT_ARJUN_BATCH_SIZE", "3"))))
+            concurrency = max(1, min(4, int(os.environ.get("VAPT_ARJUN_CONCURRENCY", "2"))))
+        except ValueError:
+            batch_size, concurrency = 3, 2
+        batches = [urls[index:index + batch_size] for index in range(0, len(urls), batch_size)]
+        semaphore = asyncio.Semaphore(concurrency)
+
+        async def run_batch(batch_index: int, batch: list[str]) -> list[dict]:
+            from tools.runner import shared_temp_path
+
+            host_path = shared_temp_path(suffix=".txt", prefix=f"arjun_{batch_index}_")
+            out_path = shared_temp_path(suffix=".json", prefix=f"arjun_{batch_index}_")
+            with open(host_path, "w", encoding="utf-8") as handle:
+                handle.write("\n".join(batch))
+            try:
+                async with semaphore:
+                    result = await self._runner.run(
+                        tool_name="arjun",
+                        args=["-i", host_path, "-o", out_path, "-t", "5"],
+                        timeout=max(60, int(os.environ.get("VAPT_ARJUN_TIMEOUT", "180"))),
+                    )
+                self._record_tool_run(result, "enumeration")
+                output = ""
+                if os.path.exists(out_path):
+                    try:
+                        with open(out_path, encoding="utf-8") as handle:
+                            output = handle.read()
+                    except OSError:
+                        output = ""
+                output = output or result.stdout
+                if not ((result.success or result.partial) and output.strip()):
+                    return []
                 try:
                     data = json.loads(output)
-                    for url, params in data.items():
-                        results.append({"url": url, "parameters": params})
                 except json.JSONDecodeError:
-                    logger.debug("[ENUM] Arjun returned partial non-JSON output; artifact retained for operator review")
-        finally:
-            try:
-                os.unlink(host_path)
-            except OSError:
-                pass
-            try:
-                os.unlink(out_path)
-            except OSError:
-                pass
+                    logger.debug(
+                        "[ENUM] Arjun batch {batch} returned partial non-JSON output; artifact retained",
+                        batch=batch_index,
+                    )
+                    return []
+                if not isinstance(data, dict):
+                    return []
+                return [
+                    {"url": url, "parameters": params}
+                    for url, params in data.items()
+                    if isinstance(params, (list, dict))
+                ]
+            finally:
+                for path in (host_path, out_path):
+                    try:
+                        os.unlink(path)
+                    except OSError:
+                        pass
 
+        batch_results = await asyncio.gather(
+            *(run_batch(index, batch) for index, batch in enumerate(batches, start=1)),
+            return_exceptions=True,
+        )
+        results: list[dict] = []
+        for batch_result in batch_results:
+            if isinstance(batch_result, Exception):
+                logger.warning("[ENUM] Arjun batch failed without discarding other batches: {err}", err=batch_result)
+            else:
+                results.extend(batch_result)
         return results
 
     async def _discover_js_endpoints(self, base_url: str) -> list[str]:

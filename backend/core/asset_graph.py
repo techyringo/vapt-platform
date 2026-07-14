@@ -233,7 +233,18 @@ class AssetGraphBuilder:
                 tech_node = self.add_asset("technology", str(tech), source, "medium")
                 self.add_edge(host_node, tech_node, "uses_technology")
 
-        for host, ports in (result.get("port_results") or result.get("services") or {}).items():
+        # EnumAgent persists Nmap records under ``ports``.  Older result
+        # producers used ``port_results``/``services``; accept all three so the
+        # graph preserves Nmap's service/product/version evidence instead of
+        # falling back to a finding-only ``host:port`` node with an unknown
+        # service label.
+        service_results = (
+            result.get("ports")
+            or result.get("port_results")
+            or result.get("services")
+            or {}
+        )
+        for host, ports in service_results.items():
             host_node = self.add_asset(infer_host_type(host), host, source, "high")
             for port in ports or []:
                 if not isinstance(port, dict):
