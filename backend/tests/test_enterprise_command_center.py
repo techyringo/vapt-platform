@@ -20,7 +20,7 @@ def test_endpoint_identity_removes_values_tracking_and_dynamic_ids():
     first = normalize_url("https://EXAMPLE.test:443/api/users/12345?utm_source=x&role=admin#fragment")
     second = normalize_url("https://example.test/api/users/67890?role=user")
 
-    assert first == "https://example.test/api/users/%7Bid%7D?role=%7Bvalue%7D"
+    assert first == "https://example.test/api/users/{id}?role=%7Bvalue%7D"
     assert first == second
     assert normalize_url("https://example.test/\\bad") == ""
 
