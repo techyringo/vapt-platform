@@ -72,6 +72,9 @@ export const api = {
   getControlEvidence: (id: string) =>
     fetchAPI<import('@/types').ControlEvidence>(`/api/scans/${id}/control-evidence`),
 
+  getAssurance: (id: string) =>
+    fetchAPI<import('@/types').AssuranceCoverage>(`/api/scans/${id}/assurance`),
+
   downloadToolArtifact: (scanId: string, runId: number, stream: 'stdout' | 'stderr' = 'stdout') =>
     apiUrl(`/api/scans/${scanId}/tool-runs/${runId}/artifact?stream=${stream}`),
 
