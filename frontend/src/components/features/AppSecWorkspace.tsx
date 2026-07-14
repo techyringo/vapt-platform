@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   AlertTriangle, ArrowRight, CheckCircle2, Code2, Download, ExternalLink,
   FileCode2, GitBranch, KeyRound, PackageSearch, Play, RefreshCw,
-  SearchCode, ShieldCheck, XCircle,
+  SearchCode, ShieldCheck, Workflow, XCircle,
 } from 'lucide-react';
 
 import { api } from '@/lib/api';
@@ -16,7 +16,8 @@ const severityRank: Record<string, number> = {
 
 const laneMeta = {
   sast: { label: 'Source analysis', icon: SearchCode, description: 'Unsafe code patterns and data-flow candidates' },
-  sca: { label: 'Dependencies & IaC', icon: PackageSearch, description: 'Known CVEs and configuration weaknesses' },
+  sca: { label: 'Dependencies & SBOM', icon: PackageSearch, description: 'Known CVEs, dependency inventory and reachability candidates' },
+  iac: { label: 'Infrastructure as code', icon: Workflow, description: 'Docker, Kubernetes, Terraform and cloud configuration policy' },
   secrets: { label: 'Secret exposure', icon: KeyRound, description: 'Credential patterns with values always redacted' },
 } as const;
 
@@ -205,7 +206,7 @@ export function AppSecWorkspace() {
                 <Metric label="Security observations" value={detail.summary?.total || 0} />
                 <Metric label="Needs triage" value={candidateCount} tone="danger" />
                 <Metric label="CVE observations" value={cveCount} tone="amber" />
-                <Metric label="Coverage lanes" value={`${Object.values(detail.coverage || {}).filter(item => item.status === 'completed').length}/3`} tone="cyan" />
+                <Metric label="Coverage lanes" value={`${Object.values(detail.coverage || {}).filter(item => item.status === 'completed').length}/${Object.keys(laneMeta).length}`} tone="cyan" />
               </div>
 
               {detail.summary?.diff && (
