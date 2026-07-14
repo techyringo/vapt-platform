@@ -6,7 +6,9 @@ services:
   redis-queue:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --maxmemory 512mb --maxmemory-policy noeviction --appendonly no
+    command: redis-server --maxmemory 768mb --maxmemory-policy noeviction --appendonly yes --appendfsync everysec --timeout 0 --tcp-keepalive 60
+    volumes:
+      - redis_queue_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
@@ -111,7 +113,7 @@ services:
       - VAPT_ARQ_HEALTH_KEY=${VAPT_ARQ_HEALTH_KEY:-vapt:tools:health}
       - VAPT_ARQ_MAX_CONNECTIONS=${VAPT_ARQ_MAX_CONNECTIONS:-50}
       - VAPT_ARQ_QUEUE_GRACE=${VAPT_ARQ_QUEUE_GRACE:-300}
-      - VAPT_SEMGREP_RULESETS=${VAPT_SEMGREP_RULESETS:-p/default,p/security-audit}
+      - VAPT_SEMGREP_RULESETS=${VAPT_SEMGREP_RULESETS:-p/default,p/security-audit,p/owasp-top-ten,p/secrets}
       - VAPT_AGENT_TIMEOUT_SECONDS=${VAPT_AGENT_TIMEOUT_SECONDS:-1800}
       - VAPT_SHARED_DIR=/tmp/vapt-shared
       - VAPT_SHARED_HOST_DIR=${PWD}/.vapt-shared
@@ -213,21 +215,22 @@ services:
       - VAPT_ARQ_MAX_CONNECTIONS=${VAPT_ARQ_MAX_CONNECTIONS:-50}
       - VAPT_ARQ_QUEUE_GRACE=${VAPT_ARQ_QUEUE_GRACE:-300}
       - VAPT_ARQ_KEEP_RESULT=${VAPT_ARQ_KEEP_RESULT:-1800}
-      - VAPT_SEMGREP_RULESETS=${VAPT_SEMGREP_RULESETS:-p/default,p/security-audit}
+      - VAPT_SEMGREP_RULESETS=${VAPT_SEMGREP_RULESETS:-p/default,p/security-audit,p/owasp-top-ten,p/secrets}
       - VAPT_AGENT_TIMEOUT_SECONDS=${VAPT_AGENT_TIMEOUT_SECONDS:-1800}
       - VAPT_DATABASE_URL=${VAPT_DATABASE_URL:-sqlite:////app/data/vapt.db}
       - VAPT_SHARED_DIR=/tmp/vapt-shared
       - VAPT_SHARED_HOST_DIR=${PWD}/.vapt-shared
       - VAPT_WORDLIST_HOST_DIR=${PWD}/backend/wordlists
-      - WORKER_MAX_JOBS=${WORKER_MAX_JOBS:-15}
+      - WORKER_MAX_JOBS=${WORKER_MAX_JOBS:-3}
     depends_on:
       redis-queue:
         condition: service_healthy
       redis:
         condition: service_healthy
     restart: unless-stopped
+    stop_grace_period: 45s
     deploy:
-      replicas: ${WORKER_REPLICAS:-2}
+      replicas: ${WORKER_REPLICAS:-1}
 
   # ─── Next.js Frontend ─────────────────────────────────────────────
   frontend:
@@ -260,3 +263,6 @@ services:
       frontend:
         condition: service_started
     restart: unless-stopped
+
+volumes:
+  redis_queue_data:
