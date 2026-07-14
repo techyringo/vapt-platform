@@ -99,7 +99,10 @@ class EnumAgent(BaseAgent):
             live_urls,
         )
         if interesting_urls:
-            param_results = await self._run_param_discovery(interesting_urls[:15])
+            # Arjun is request-intensive. A ranked six-endpoint batch gives it
+            # time to finish and persist JSON instead of timing out midway
+            # through a broad, low-value list.
+            param_results = await self._run_param_discovery(interesting_urls[:6])
 
         # Discover JS endpoints
         for entry in live_urls:
@@ -296,8 +299,8 @@ class EnumAgent(BaseAgent):
         try:
             result = await self._runner.run(
                 tool_name="arjun",
-                args=["-i", host_path, "-o", out_path],
-                timeout=300,
+                args=["-i", host_path, "-o", out_path, "-t", "5"],
+                timeout=max(60, int(os.environ.get("VAPT_ARJUN_TIMEOUT", "180"))),
             )
             self._record_tool_run(result, "enumeration")
             output = ""
@@ -308,13 +311,13 @@ class EnumAgent(BaseAgent):
                 except OSError:
                     output = ""
             output = output or result.stdout
-            if result.success and output.strip():
+            if (result.success or result.partial) and output.strip():
                 try:
                     data = json.loads(output)
                     for url, params in data.items():
                         results.append({"url": url, "parameters": params})
                 except json.JSONDecodeError:
-                    pass
+                    logger.debug("[ENUM] Arjun returned partial non-JSON output; artifact retained for operator review")
         finally:
             try:
                 os.unlink(host_path)

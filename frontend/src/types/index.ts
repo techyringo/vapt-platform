@@ -245,6 +245,7 @@ export interface AssuranceCategory {
   title: string;
   status: 'tested' | 'observed' | 'not_tested';
   executed_tools: string[];
+  executed_validators: string[];
   observed_assets: string[];
   evidence_refs: string[];
   limitation: string;
@@ -258,6 +259,23 @@ export interface AssuranceCoverage {
   scope: string[];
   summary: { total: number; tested: number; observed: number; not_tested: number; confirmed_proofs: number };
   categories: AssuranceCategory[];
+  dynamic_validation?: {
+    hypotheses_planned: number;
+    hypotheses_scheduled: number;
+    hypotheses_tested: number;
+    proofs_confirmed: number;
+    validator_summary: Record<string, Record<string, number>>;
+    attempts: Array<{
+      hypothesis_id: string;
+      validator: string;
+      vuln_type: string;
+      url: string;
+      parameter: string;
+      source: string;
+      status: 'confirmed' | 'not_confirmed' | 'skipped' | 'error';
+      reason: string;
+    }>;
+  };
   frameworks: Array<{ name: string; version: string; purpose: string; url: string }>;
   disclaimer: string;
 }

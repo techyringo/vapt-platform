@@ -67,3 +67,24 @@ def test_wstg_projection_separates_observed_from_tested():
     assert statuses["WSTG-INPV"] == "observed"
     assert statuses["WSTG-BUSL"] == "not_tested"
     assert result["claim"] == "testing_coverage_only"
+
+
+def test_wstg_projection_counts_typed_validator_execution():
+    result = build_assurance_coverage(
+        scan={"targets": ["example.test"]},
+        assets=[{"asset_type": "parameter"}],
+        actions=[],
+        findings=[],
+        validation_summary={
+            "hypotheses_planned": 4,
+            "hypotheses_tested": 2,
+            "proofs_confirmed": 0,
+            "validator_summary": {"sqli_error_boolean": {"not_confirmed": 2}},
+            "validation_attempts": [],
+        },
+    )
+
+    category = next(item for item in result["categories"] if item["category_id"] == "WSTG-INPV")
+    assert category["status"] == "tested"
+    assert category["executed_validators"] == ["sqli_error_boolean"]
+    assert result["dynamic_validation"]["hypotheses_tested"] == 2

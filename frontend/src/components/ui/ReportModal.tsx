@@ -42,10 +42,10 @@ const FORMATS: Format[] = [
   {
     id: 'pdf',
     label: 'PDF Report',
-    description: 'Print-ready executive summary. (Coming soon)',
+    description: 'Print-ready executive and technical assessment report.',
     ext: 'pdf',
     icon: FileText,
-    available: false,
+    available: true,
   },
 ];
 

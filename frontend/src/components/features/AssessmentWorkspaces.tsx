@@ -193,9 +193,11 @@ export function LiveScanWorkspace({
                 </table>
               </div>
 
-              <div className="operation-section-head operation-runs-head"><div><span>Runner outcomes</span><h2>Scanner execution evidence</h2></div><small>Raw output remains in bounded artifacts</small></div>
-              <div className="operation-table-wrap">
-                <table className="operation-table tool-outcome-table">
+              <details className="operation-run-diagnostics">
+                <summary><div><span>Operator diagnostics</span><strong>Runner execution ledger</strong></div><small>{attentionRuns.length} need attention · {toolRuns.length} persisted outcomes</small></summary>
+                <p>Implementation-level runner outcomes are hidden from the customer assessment view. Raw output remains in access-controlled artifacts.</p>
+                <div className="operation-table-wrap">
+                  <table className="operation-table tool-outcome-table">
                   <thead><tr><th>Outcome</th><th>Tool</th><th>Phase</th><th>Duration</th><th>Exit</th><th>Evidence</th><th>Recorded</th></tr></thead>
                   <tbody>
                     {!activeToolRuns.length && <tr><td colSpan={7} className="operation-table-empty">No tool outcome has been persisted for this assessment.</td></tr>}
@@ -208,8 +210,9 @@ export function LiveScanWorkspace({
                       </tr>
                     ))}
                   </tbody>
-                </table>
-              </div>
+                  </table>
+                </div>
+              </details>
             </section>
 
             <aside className="operation-context-pane">
@@ -272,6 +275,21 @@ export function ReconIntelWorkspace({ selectedScan, graph, toolRuns }: {
     return result;
   }, {});
   const reconRuns = toolRuns.filter(run => ['recon', 'enumeration'].includes(run.phase));
+  const assetLabelByKey = new Map(assets.map(asset => [asset.asset_key, asset.value]));
+  const serviceAssets = assets.filter(asset => asset.asset_type === 'service');
+  const technologyAssets = assets.filter(asset => asset.asset_type === 'technology');
+  const domainAssets = assets.filter(asset => ['domain', 'subdomain'].includes(asset.asset_type));
+
+  const describeService = (asset: AssetNode) => {
+    const metadata = asset.metadata || {};
+    const port = metadata.port || asset.value.match(/:(\d{1,5})(?:\/|$)/)?.[1] || '—';
+    return {
+      port: String(port),
+      service: String(metadata.service || metadata.name || metadata.product || 'unknown service'),
+      protocol: String(metadata.protocol || metadata.transport || 'tcp'),
+      version: String(metadata.version || metadata.banner || ''),
+    };
+  };
 
   return (
     <section className="enterprise-workspace">
@@ -285,6 +303,25 @@ export function ReconIntelWorkspace({ selectedScan, graph, toolRuns }: {
             <div><span>Canonical assets</span><strong>{graph.total_assets}</strong><small>{graph.raw_observations} raw observations</small></div>
             <div><span>Evidence edges</span><strong>{graph.total_edges}</strong><small>{graph.raw_relationships} raw relationships</small></div>
             <div><span>Recon runs</span><strong>{reconRuns.length}</strong><small>{reconRuns.filter(run => run.success).length} completed</small></div>
+          </div>
+
+          <div className="recon-intelligence-grid">
+            <div className="card-glass service-inventory">
+              <div className="workspace-panel-head"><div><span className="section-label">Network exposure</span><h3>Ports and services</h3></div><span className="truth-chip">{serviceAssets.length} observed</span></div>
+              {serviceAssets.length === 0 ? <div className="quiet-empty">No port or service evidence has been persisted.</div> : (
+                <div className="service-inventory-table">
+                  <div className="service-inventory-head"><span>Host / endpoint</span><span>Port</span><span>Service</span><span>Protocol</span><span>Evidence</span></div>
+                  {serviceAssets.slice(0, 40).map(asset => { const detail = describeService(asset); return (
+                    <article key={asset.asset_key}><strong title={asset.value}>{asset.value}</strong><code>{detail.port}</code><span>{detail.service}<small>{detail.version}</small></span><code>{detail.protocol}</code><small>{asset.source} · {asset.confidence}</small></article>
+                  ); })}
+                </div>
+              )}
+            </div>
+            <div className="card-glass technology-map">
+              <div className="workspace-panel-head"><div><span className="section-label">Technology map</span><h3>Observed stack</h3></div><span className="truth-chip">evidence-backed</span></div>
+              {technologyAssets.length === 0 ? <div className="quiet-empty">No technology fingerprint has passed normalization.</div> : <div className="technology-cloud">{technologyAssets.slice(0, 40).map(asset => <span key={asset.asset_key} title={`${asset.source} · ${asset.confidence}`}>{asset.value}<small>{asset.metadata?.version || asset.metadata?.category || ''}</small></span>)}</div>}
+              <div className="technology-map-foot"><span>{domainAssets.length} host identities</span><span>{graph.edges.length} observed relationships</span></div>
+            </div>
           </div>
 
           {assets.length === 0 ? <div className="workspace-empty"><Target size={30} /><strong>No verified surface yet</strong><span>Assets appear only after a discovery capability emits persisted evidence.</span></div> : (
@@ -314,7 +351,7 @@ export function ReconIntelWorkspace({ selectedScan, graph, toolRuns }: {
             {!graph.edges.length ? <div className="quiet-empty">No persisted asset relationship has been established.</div> : (
               <div className="relation-list">
                 {graph.edges.slice(0, 50).map(edge => (
-                  <article key={edge.edge_key}><code>{edge.source_key}</code><span>{formatLabel(edge.relation)} <ArrowRight size={12} /></span><code>{edge.target_key}</code><small>{edge.evidence}</small></article>
+                  <article key={edge.edge_key}><code title={edge.source_key}>{assetLabelByKey.get(edge.source_key) || 'Unresolved source'}</code><span>{formatLabel(edge.relation)} <ArrowRight size={12} /></span><code title={edge.target_key}>{assetLabelByKey.get(edge.target_key) || 'Unresolved target'}</code><small>{edge.evidence}</small></article>
                 ))}
               </div>
             )}
@@ -338,6 +375,8 @@ export function DastWorkspace({ selectedScan, assurance, findings, toolRuns, dec
   const quarantined = findings.filter(item => item.quarantined);
   const dastRuns = toolRuns.filter(run => ['vuln_scanning', 'fuzzing', 'exploitation'].includes(run.phase));
   const latestPlan = decisions.find(item => item.decision_type === 'adaptive_capability_plan') || decisions[0];
+  const dynamicValidation = assurance?.dynamic_validation;
+  const validatorEntries = Object.entries(dynamicValidation?.validator_summary || {});
 
   return (
     <section className="enterprise-workspace">
@@ -406,11 +445,32 @@ export function DastWorkspace({ selectedScan, assurance, findings, toolRuns, dec
                       <div><code>{category.category_id}</code><span className={`coverage-signal ${category.status}`} /></div>
                       <strong>{category.title}</strong>
                       <p>{category.limitation}</p>
-                      <footer>{category.executed_tools.length ? category.executed_tools.join(', ') : category.observed_assets.length ? `${category.observed_assets.length} observed assets` : 'No execution evidence'}</footer>
+                      <footer>{category.executed_validators?.length ? category.executed_validators.map(formatLabel).join(', ') : category.executed_tools.length ? category.executed_tools.join(', ') : category.observed_assets.length ? `${category.observed_assets.length} observed assets` : 'No execution evidence'}</footer>
                     </article>
                   ))}
                 </div>
                 <div className="evidence-disclaimer" role="note"><AlertTriangle size={15} /><div><strong>Coverage is not proof of absence</strong><span>{assurance.disclaimer}</span></div></div>
+              </>
+            )}
+          </div>
+
+          <div className="card-glass validator-execution-panel">
+            <div className="workspace-panel-head"><div><span className="section-label">Dynamic validation execution</span><h3>What was actually tested</h3></div><span className="truth-chip">negative results retained</span></div>
+            {!dynamicValidation || dynamicValidation.hypotheses_tested === 0 ? <div className="quiet-empty">No typed validator execution ledger has been persisted for this assessment.</div> : (
+              <>
+                <div className="validator-execution-summary">
+                  <div><span>Planned</span><strong>{dynamicValidation.hypotheses_planned}</strong></div>
+                  <div><span>Executed</span><strong>{dynamicValidation.hypotheses_tested}</strong></div>
+                  <div><span>Confirmed</span><strong>{dynamicValidation.proofs_confirmed}</strong></div>
+                  <div><span>Not confirmed / skipped</span><strong>{dynamicValidation.attempts.filter(item => item.status !== 'confirmed').length}</strong></div>
+                </div>
+                <div className="validator-execution-list">
+                  {validatorEntries.map(([validator, statuses]) => {
+                    const total = Object.values(statuses).reduce((sum, value) => sum + value, 0);
+                    return <article key={validator}><div><strong>{formatLabel(validator)}</strong><small>{total} bounded test{total === 1 ? '' : 's'}</small></div><div>{Object.entries(statuses).map(([status, count]) => <span key={status} className={status}>{formatLabel(status)} {count}</span>)}</div></article>;
+                  })}
+                </div>
+                {dynamicValidation.attempts.some(item => item.status === 'skipped' || item.status === 'error') && <div className="validator-attention"><AlertTriangle size={14} /><div><strong>Tests requiring attention</strong>{dynamicValidation.attempts.filter(item => item.status === 'skipped' || item.status === 'error').slice(0, 6).map(item => <span key={item.hypothesis_id}>{formatLabel(item.validator)}: {item.reason}</span>)}</div></div>}
               </>
             )}
           </div>

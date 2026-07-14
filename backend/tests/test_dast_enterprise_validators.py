@@ -103,3 +103,38 @@ async def test_sqli_validator_requires_paired_boolean_negative_control(monkeypat
 def test_response_similarity_is_bounded_and_whitespace_stable():
     assert DASTValidator._response_similarity("hello   world", "hello\nworld") == 1.0
     assert DASTValidator._response_similarity("allow", "deny") < 0.72
+
+
+@pytest.mark.asyncio
+async def test_validation_ledger_keeps_negative_and_skipped_outcomes(monkeypatch):
+    validator = DASTValidator()
+    hypotheses = [
+        DASTHypothesis(
+            id="hyp_sqli", vuln_type="sqli", validator="sqli_error_boolean",
+            candidate=InputCandidate(
+                id="inp_sqli", url="https://example.test/items?id=1", method="GET",
+                parameter="id", value="1", source="parameter_discovery",
+            ),
+            reason="Test SQL handling.",
+        ),
+        DASTHypothesis(
+            id="hyp_ssrf", vuln_type="ssrf", validator="ssrf_http_oob",
+            candidate=InputCandidate(
+                id="inp_ssrf", url="https://example.test/fetch?url=https://example.org", method="GET",
+                parameter="url", value="https://example.org", source="crawler",
+            ),
+            reason="Test server-side fetch behavior.",
+        ),
+    ]
+
+    async def no_proof(_hypothesis):
+        return None
+
+    monkeypatch.setattr(validator, "validate", no_proof)
+    proofs = await validator.validate_many(hypotheses, max_checks=2, concurrency=2)
+
+    assert proofs == []
+    outcomes = {item["hypothesis_id"]: item for item in validator.attempts}
+    assert outcomes["hyp_sqli"]["status"] == "not_confirmed"
+    assert outcomes["hyp_ssrf"]["status"] == "skipped"
+    assert "OOB callback" in outcomes["hyp_ssrf"]["reason"]

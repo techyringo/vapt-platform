@@ -240,21 +240,25 @@ export function AttackSurfaceWorkspace({
 	                    </div>
 	                  )}
 
-	                  <div className="card-glass" style={{ padding: 14 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
+	                  <details className="card-glass operator-diagnostics">
+                    <summary>
                       <div>
-                        <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Runs</h3>
-                        <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
+                        <h3>Operator scanner artifacts</h3>
+                        <p>
                           {toolRuns.length} captured · {partialToolRuns.length} partial · {failedToolRuns.length} failed
                         </p>
                       </div>
+                      <span className="badge badge-idle">restricted diagnostics</span>
+                    </summary>
+                    <div className="operator-diagnostics-body">
+                      <div className="operator-diagnostics-actions"><span>Commands and raw output are implementation diagnostics, not customer findings.</span>
                       <button
                         onClick={onRefreshToolRuns}
                         className="btn btn-secondary"
                       >
                         <RefreshCw size={14} aria-hidden="true" />Refresh
                       </button>
-                    </div>
+                      </div>
                     {toolRuns.length === 0 ? (
                       <div className="quiet-empty">Tool output appears after agents finish their current phase.</div>
                     ) : (
@@ -295,7 +299,8 @@ export function AttackSurfaceWorkspace({
                         })}
                       </div>
                     )}
-                  </div>
+                    </div>
+                  </details>
                 </div>
               )}
             </section>

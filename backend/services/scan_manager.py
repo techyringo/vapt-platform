@@ -257,6 +257,12 @@ class ScanManager:
 
     def get_assurance_coverage(self, scan_id: str) -> dict[str, Any]:
         """Project persisted evidence onto recognized OWASP testing domains."""
+        validation_events = self._store.load_events(
+            scan_id,
+            event_type="dast_validation_summary",
+            limit=1,
+        )
+        validation_summary = validation_events[-1] if validation_events else {}
         return {
             "scan_id": scan_id,
             **build_assurance_coverage(
@@ -264,6 +270,7 @@ class ScanManager:
                 findings=self._findings.get(scan_id, []),
                 assets=self.get_asset_graph(scan_id).get("assets", []),
                 actions=self._store.load_durable_actions(scan_id),
+                validation_summary=validation_summary,
             ),
         }
 
@@ -1441,6 +1448,19 @@ class ScanManager:
                 if task.phase.value == phase and isinstance(task.result, dict):
                     phase_context = task.result
                     break
+            if phase == "exploitation":
+                asyncio.create_task(self._broadcast(ScanEvent(
+                    event_type="dast_validation_summary",
+                    scan_id=scan_id,
+                    data={
+                        "hypotheses_planned": int(phase_context.get("hypotheses_planned") or 0),
+                        "hypotheses_scheduled": int(phase_context.get("hypotheses_scheduled") or 0),
+                        "hypotheses_tested": int(phase_context.get("hypotheses_tested") or 0),
+                        "proofs_confirmed": int(phase_context.get("proofs_confirmed") or 0),
+                        "validator_summary": phase_context.get("validator_summary") or {},
+                        "validation_attempts": (phase_context.get("validation_attempts") or [])[:250],
+                    },
+                )))
             asyncio.create_task(self._broadcast(ScanEvent(
                 event_type="phase_complete",
                 scan_id=scan_id,

@@ -83,6 +83,7 @@ class DASTValidator:
         self.timeout = timeout
         self.oob_store = oob_store
         self.oob_base_url = (oob_base_url or os.environ.get("VAPT_OOB_BASE_URL", "")).rstrip("/")
+        self.attempts: list[dict[str, Any]] = []
 
     async def validate_many(
         self,
@@ -94,9 +95,32 @@ class DASTValidator:
         sem = asyncio.Semaphore(max(1, concurrency))
         selected = hypotheses[:max(1, max_checks)]
 
+        self.attempts = []
+
         async def run_one(hypothesis: DASTHypothesis) -> ValidationProof | None:
             async with sem:
-                return await self.validate(hypothesis)
+                prerequisite = self._prerequisite_failure(hypothesis)
+                if prerequisite:
+                    self.attempts.append(self._attempt_record(hypothesis, "skipped", prerequisite))
+                    return None
+                try:
+                    proof = await self.validate(hypothesis)
+                except Exception as exc:
+                    self.attempts.append(self._attempt_record(
+                        hypothesis,
+                        "error",
+                        f"{type(exc).__name__}: {str(exc)[:240]}",
+                    ))
+                    return None
+                if proof is not None:
+                    self.attempts.append(self._attempt_record(hypothesis, "confirmed", "Evidence threshold met."))
+                    return proof
+                self.attempts.append(self._attempt_record(
+                    hypothesis,
+                    "not_confirmed",
+                    "Validator completed; the issue-specific proof threshold was not met.",
+                ))
+                return None
 
         results = await asyncio.gather(*(run_one(item) for item in selected), return_exceptions=True)
         proofs: list[ValidationProof] = []
@@ -104,6 +128,28 @@ class DASTValidator:
             if isinstance(item, ValidationProof):
                 proofs.append(item)
         return proofs
+
+    def _prerequisite_failure(self, hypothesis: DASTHypothesis) -> str:
+        if not self._in_scope(hypothesis.candidate.url):
+            return "Candidate is outside the authorised engagement scope."
+        if hypothesis.validator == "ssrf_http_oob" and (
+            self.oob_store is None or not self.oob_base_url.startswith(("http://", "https://"))
+        ):
+            return "OOB callback receiver is not configured; SSRF was not tested."
+        return ""
+
+    @staticmethod
+    def _attempt_record(hypothesis: DASTHypothesis, status: str, reason: str) -> dict[str, Any]:
+        return {
+            "hypothesis_id": hypothesis.id,
+            "validator": hypothesis.validator,
+            "vuln_type": hypothesis.vuln_type,
+            "url": hypothesis.candidate.url,
+            "parameter": hypothesis.candidate.parameter,
+            "source": hypothesis.candidate.source,
+            "status": status,
+            "reason": reason,
+        }
 
     async def validate(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
         if not self._in_scope(hypothesis.candidate.url):

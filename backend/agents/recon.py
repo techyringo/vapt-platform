@@ -518,7 +518,7 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="waybackurls",
             args=[domain],
-            timeout=max(30, int(os.environ.get("VAPT_WAYBACK_TIMEOUT", "120"))),
+            timeout=max(30, int(os.environ.get("VAPT_WAYBACK_TIMEOUT", "90"))),
         )
         self._record_tool_run(result, "recon")
         if result.stdout.strip():
@@ -528,35 +528,20 @@ class ReconAgent(BaseAgent):
         return []
 
     async def _run_gau(self, domain: str) -> list[str]:
-        """Collect URLs from multiple sources using gau with one bounded retry.
+        """Collect root-domain archive URLs without stalling the scan.
 
-        GAU aggregates external archives, so a transient provider/network
-        failure is expected operationally. Retry once at lower concurrency,
-        record only the final logical outcome, and preserve any partial URL
-        evidence instead of reporting an unexplained hard failure.
+        Subdomains are discovered by dedicated recon providers. Asking GAU to
+        expand them again makes large public targets explode in size and the
+        previous identical retry added another three minutes without changing
+        the failure mode. Preserve partial output from one bounded request and
+        let live crawling continue independently.
         """
-        timeout = max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "180")))
-        attempts = (
-            ["--subs", "--threads", "5", domain],
-            ["--subs", "--threads", "2", domain],
+        timeout = max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "90")))
+        result = await self._runner.run(
+            tool_name="gau",
+            args=["--threads", "3", domain],
+            timeout=timeout,
         )
-        first_error = ""
-        result = None
-        for attempt, args in enumerate(attempts, start=1):
-            result = await self._runner.run(tool_name="gau", args=args, timeout=timeout)
-            if result.stdout.strip() or result.success:
-                break
-            first_error = (result.stderr or result.timeout_reason or "no output")[-1000:]
-            if attempt < len(attempts):
-                logger.warning(
-                    "[RECON] gau attempt {attempt} produced no evidence; retrying once with lower concurrency",
-                    attempt=attempt,
-                )
-
-        if result is None:
-            return []
-        if first_error and result.stderr:
-            result.stderr = f"Initial attempt: {first_error}\nFinal attempt: {result.stderr}"[-5000:]
         self._record_tool_run(result, "recon")
         if result.stdout.strip():
             urls = sorted({u.strip() for u in result.stdout.splitlines() if u.strip().startswith(("http://", "https://"))})
