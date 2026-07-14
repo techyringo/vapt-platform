@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
+import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlsplit, urlunsplit
 
 
 @dataclass(frozen=True)
@@ -50,14 +51,38 @@ def infer_host_type(host: str) -> str:
         return "domain"
 
 
+_TRACKING_PARAMETERS = {
+    "fbclid", "gclid", "mc_cid", "mc_eid", "ref", "source",
+    "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term",
+}
+_UUID_OR_HASH = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{24,}|\d{4,})$", re.I)
+
+
 def normalize_url(value: str) -> str:
-    parsed = urlparse(value)
+    """Return a canonical endpoint identity, not a crawler-observation URL.
+
+    Query values, fragments and tracking parameters are intentionally excluded
+    from identity. Dynamic path identifiers are templated. The original sample
+    remains in node metadata for evidence and replay.
+    """
+
+    raw = str(value or "").strip()
+    if not raw or "\\" in raw:
+        return ""
+    parsed = urlsplit(raw)
     if not parsed.scheme:
-        return value.strip().rstrip("/")
-    netloc = parsed.netloc.lower()
-    path = parsed.path.rstrip("/")
-    query = f"?{parsed.query}" if parsed.query else ""
-    return f"{parsed.scheme.lower()}://{netloc}{path}{query}"
+        return raw.rstrip("/")
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return ""
+    scheme = parsed.scheme.lower()
+    hostname = parsed.hostname.lower().rstrip(".")
+    port = parsed.port
+    netloc = hostname if not port or (scheme == "http" and port == 80) or (scheme == "https" and port == 443) else f"{hostname}:{port}"
+    segments = ["{id}" if _UUID_OR_HASH.fullmatch(segment) else segment for segment in parsed.path.split("/")]
+    path = "/".join(segments).rstrip("/") or "/"
+    names = sorted({name for name, _ in parse_qsl(parsed.query, keep_blank_values=True) if name.lower() not in _TRACKING_PARAMETERS})
+    query = urlencode([(name, "{value}") for name in names])
+    return urlunsplit((scheme, netloc, path, query, ""))
 
 
 class AssetGraphBuilder:
@@ -76,20 +101,29 @@ class AssetGraphBuilder:
         confidence: str = "medium",
         metadata: dict[str, Any] | None = None,
     ) -> AssetNode | None:
-        value = normalize_url(str(value or "").strip())
+        raw_value = str(value or "").strip()
+        value = normalize_url(raw_value) if asset_type in {"url", "api_endpoint", "js_file"} else raw_value
         if not value:
             return None
+        normalized_metadata = dict(metadata or {})
+        if asset_type in {"url", "api_endpoint", "js_file"}:
+            normalized_metadata.setdefault("raw_samples", [raw_value][:1])
+            normalized_metadata.setdefault("observation_count", 1)
         node = AssetNode(
             asset_type=asset_type,
             value=value,
             source=source,
             confidence=confidence,
-            metadata=metadata or {},
+            metadata=normalized_metadata,
         )
         existing = self.assets.get(node.key)
         if existing:
             merged = dict(existing.metadata)
             merged.update(node.metadata)
+            if asset_type in {"url", "api_endpoint", "js_file"}:
+                samples = list(dict.fromkeys([*(existing.metadata.get("raw_samples") or []), raw_value]))[:5]
+                merged["raw_samples"] = samples
+                merged["observation_count"] = int(existing.metadata.get("observation_count") or 1) + 1
             node = AssetNode(
                 asset_type=existing.asset_type,
                 value=existing.value,
@@ -250,3 +284,42 @@ def summarize_assets(assets: list[dict[str, Any]]) -> dict[str, int]:
         asset_type = asset.get("asset_type", "unknown")
         summary[asset_type] = summary.get(asset_type, 0) + 1
     return dict(sorted(summary.items()))
+
+
+def canonical_graph_projection(
+    assets: list[dict[str, Any]], edges: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Collapse legacy/raw URL rows into canonical assets for API projection."""
+
+    projected: dict[str, dict[str, Any]] = {}
+    key_map: dict[str, str] = {}
+    for item in assets:
+        asset_type = str(item.get("asset_type") or "unknown")
+        raw_value = str(item.get("value") or "")
+        value = normalize_url(raw_value) if asset_type in {"url", "api_endpoint", "js_file"} else raw_value.strip()
+        if not value:
+            continue
+        node = AssetNode(asset_type, value, str(item.get("source") or "unknown"), str(item.get("confidence") or "medium"))
+        key_map[str(item.get("asset_key") or "")] = node.key
+        current = projected.get(node.key)
+        metadata = dict(item.get("metadata") or {})
+        metadata.setdefault("raw_samples", [raw_value] if value != raw_value else [])
+        metadata["observation_count"] = max(1, int(metadata.get("observation_count") or 1))
+        if current:
+            previous = current.get("metadata") or {}
+            metadata["observation_count"] += int(previous.get("observation_count") or 1)
+            metadata["raw_samples"] = list(dict.fromkeys([*(previous.get("raw_samples") or []), *(metadata.get("raw_samples") or [])]))[:5]
+            current["metadata"] = metadata
+            current["source"] = ",".join(dict.fromkeys([*str(current.get("source") or "").split(","), *str(item.get("source") or "").split(",")]))
+        else:
+            projected[node.key] = {**item, "asset_key": node.key, "value": value, "metadata": metadata}
+
+    projected_edges: dict[str, dict[str, Any]] = {}
+    for item in edges:
+        source = key_map.get(str(item.get("source_key") or ""))
+        target = key_map.get(str(item.get("target_key") or ""))
+        if not source or not target or source == target:
+            continue
+        edge = AssetEdge(source, target, str(item.get("relation") or "related"), str(item.get("evidence") or ""))
+        projected_edges[edge.key] = {**item, **edge.to_record()}
+    return list(projected.values()), list(projected_edges.values())
