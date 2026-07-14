@@ -30,7 +30,7 @@ import {
 import { useSSE } from '@/hooks/useSSE';
 import { useToast } from '@/hooks/useToast';
 import { api } from '@/lib/api';
-import type { AgentDecision, AgentStatus, AssetGraph, AttackChainResult, ControlEvidence, DurableOperation, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
+import type { AgentDecision, AgentStatus, AssetGraph, AssuranceCoverage, AttackChainResult, DurableOperation, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
 
@@ -93,6 +93,19 @@ const SEV_DOT_COLOR: Record<string, string> = {
 /* ─── Helpers ────────────────────────────────────────────── */
 function formatPhase(phase?: string) {
   return (phase || 'standby').replace(/_/g, ' ');
+}
+
+function formatExecutedCapabilities(items: Array<{ tool: string; outcome: string }>) {
+  const grouped = new Map<string, { count: number; outcomes: Set<string> }>();
+  items.forEach(item => {
+    const current = grouped.get(item.tool) || { count: 0, outcomes: new Set<string>() };
+    current.count += 1;
+    current.outcomes.add(item.outcome.replaceAll('_', ' '));
+    grouped.set(item.tool, current);
+  });
+  return [...grouped.entries()].map(([tool, value]) =>
+    `${tool}${value.count > 1 ? ` ×${value.count}` : ''}: ${[...value.outcomes].join('/')}`,
+  ).join(' · ');
 }
 
 function scanTime(scan: Scan) {
@@ -218,7 +231,7 @@ export default function Dashboard() {
 	  const [toolRuns,       setToolRuns]       = useState<ToolRun[]>([]);
 	  const [operation,      setOperation]      = useState<DurableOperation | null>(null);
 	  const [coverage,       setCoverage]       = useState<ScanCoverage | null>(null);
-  const [controlEvidence, setControlEvidence] = useState<ControlEvidence | null>(null);
+  const [assurance,       setAssurance]       = useState<AssuranceCoverage | null>(null);
   const [assetGraph,      setAssetGraph]      = useState<AssetGraph | null>(null);
   const [decisions,      setDecisions]      = useState<AgentDecision[]>([]);
   const [attackChains,   setAttackChains]   = useState<AttackChainResult | null>(null);
@@ -355,7 +368,7 @@ export default function Dashboard() {
         api.getAssetGraph(event.scan_id).then(setAssetGraph).catch(() => {});
         api.getToolRuns(event.scan_id).then(r => setToolRuns(r.tool_runs)).catch(() => {});
         api.getOperation(event.scan_id).then(setOperation).catch(() => {});
-        api.getControlEvidence(event.scan_id).then(setControlEvidence).catch(() => {});
+        api.getAssurance(event.scan_id).then(setAssurance).catch(() => {});
       }
       absorbEvent(event);
       return;
@@ -381,7 +394,7 @@ export default function Dashboard() {
         setAgentStatus({});
         setToolRuns([]);
         setOperation(null);
-        setControlEvidence(null);
+        setAssurance(null);
         setAssetGraph(null);
       }
       absorbEvent(event);
@@ -448,7 +461,7 @@ export default function Dashboard() {
 	    setToolRuns([]);
 	    setOperation(null);
 	    setCoverage(null);
-	    setControlEvidence(null);
+	    setAssurance(null);
 	    setAssetGraph(null);
 	    setDecisions([]);
 	    setAttackChains(null);
@@ -459,7 +472,7 @@ export default function Dashboard() {
 	      api.getToolRuns(selectedScan.scan_id),
 	      api.getOperation(selectedScan.scan_id),
 	      api.getCoverage(selectedScan.scan_id),
-	      api.getControlEvidence(selectedScan.scan_id),
+	      api.getAssurance(selectedScan.scan_id),
 	      api.getAssetGraph(selectedScan.scan_id),
 	      api.getDecisions(selectedScan.scan_id),
 	      api.getAttackChains(selectedScan.scan_id),
@@ -469,7 +482,7 @@ export default function Dashboard() {
 	      if (toolRunRes.status === 'fulfilled')  setToolRuns(toolRunRes.value.tool_runs);
 	      if (operationRes.status === 'fulfilled') setOperation(operationRes.value);
 	      if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
-	      if (controlRes.status === 'fulfilled') setControlEvidence(controlRes.value);
+	      if (controlRes.status === 'fulfilled') setAssurance(controlRes.value);
 	      if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	      if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	      if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
@@ -498,7 +511,7 @@ export default function Dashboard() {
 	        api.getToolRuns(selectedScan.scan_id),
 	        api.getOperation(selectedScan.scan_id),
 	        api.getCoverage(selectedScan.scan_id),
-	        api.getControlEvidence(selectedScan.scan_id),
+	        api.getAssurance(selectedScan.scan_id),
 	        api.getAssetGraph(selectedScan.scan_id),
 	        api.getDecisions(selectedScan.scan_id),
 	        api.getAttackChains(selectedScan.scan_id),
@@ -506,7 +519,7 @@ export default function Dashboard() {
 	        if (toolRunRes.status === 'fulfilled') setToolRuns(toolRunRes.value.tool_runs);
 	        if (operationRes.status === 'fulfilled') setOperation(operationRes.value);
 	        if (coverageRes.status === 'fulfilled') setCoverage(coverageRes.value.coverage);
-	        if (controlRes.status === 'fulfilled') setControlEvidence(controlRes.value);
+	        if (controlRes.status === 'fulfilled') setAssurance(controlRes.value);
 	        if (assetRes.status === 'fulfilled') setAssetGraph(assetRes.value);
 	        if (decisionsRes.status === 'fulfilled') setDecisions(decisionsRes.value.decisions);
 	        if (chainsRes.status === 'fulfilled') setAttackChains(chainsRes.value);
@@ -666,6 +679,10 @@ export default function Dashboard() {
     () => (assetGraph?.assets || []).filter(asset => ['domain', 'subdomain', 'service', 'technology', 'api_endpoint', 'url'].includes(asset.asset_type)).slice(0, 24),
     [assetGraph?.assets],
   );
+  const assetLabelByKey = useMemo(
+    () => new Map((assetGraph?.assets || []).map(asset => [asset.asset_key, asset.value])),
+    [assetGraph?.assets],
+  );
 
   const priorityFindings   = [...verifiedFindings, ...sortedFindings.filter(item => !verifiedFindings.includes(item))].slice(0, 8);
   const agentEntries       = useMemo(() => Object.entries(agentStatus), [agentStatus]);
@@ -775,10 +792,10 @@ export default function Dashboard() {
   }, []);
 
   const commandActions: CommandAction[] = [
-    { id: 'nav-dashboard', group: 'Navigate', label: 'Assessments', sub: 'Authorised scopes and live execution', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview scan dast', run: () => setActiveTab('dashboard') },
+    { id: 'nav-dashboard', group: 'Navigate', label: 'Command Center', sub: 'Authorised scopes and live execution', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview scan dast', run: () => setActiveTab('dashboard') },
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
-    { id: 'nav-agents', group: 'Navigate', label: 'Attack Paths', sub: 'Evidence chains and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence', run: () => setActiveTab('agents') },
-    { id: 'nav-govern', group: 'Navigate', label: 'Control Evidence', sub: 'Versioned controls backed by scan artifacts', icon: ClipboardCheck, hint: ['4'], keywords: 'compliance evidence controls audit', run: () => setActiveTab('govern') },
+    { id: 'nav-agents', group: 'Navigate', label: 'Attack Surface', sub: 'Canonical assets, paths and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence surface', run: () => setActiveTab('agents') },
+    { id: 'nav-govern', group: 'Navigate', label: 'Test Coverage', sub: 'OWASP WSTG evidence coverage', icon: ClipboardCheck, hint: ['4'], keywords: 'wstg asvs testing evidence audit', run: () => setActiveTab('govern') },
     { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['5'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
       id: 'act-new-scan', group: 'Actions', label: 'New assessment', sub: 'Define an authorised scope', icon: Play, keywords: 'start run target',
@@ -1317,7 +1334,7 @@ export default function Dashboard() {
                             Persisted assets and observed relationships · no inferred decorative nodes
                           </p>
                         </div>
-                        <span className="badge badge-informational">{assetGraph?.total_assets || 0} assets · {assetGraph?.total_edges || 0} edges</span>
+                        <span className="badge badge-informational">{assetGraph?.raw_observations || 0} observations → {assetGraph?.total_assets || 0} canonical assets · {assetGraph?.total_edges || 0} relations</span>
                       </div>
                       {mappedSurfaceAssets.length === 0 ? (
                         <div className="quiet-empty">The map appears after body-verified discovery evidence is persisted.</div>
@@ -1335,9 +1352,9 @@ export default function Dashboard() {
                           <div className="surface-map-edges">
                             {(assetGraph?.edges || []).slice(0, 12).map(edge => (
                               <div key={edge.edge_key}>
-                                <code>{edge.source_key}</code>
+                                <code title={edge.source_key}>{assetLabelByKey.get(edge.source_key) || edge.source_key}</code>
                                 <span>{edge.relation.replaceAll('_', ' ')} →</span>
-                                <code>{edge.target_key}</code>
+                                <code title={edge.target_key}>{assetLabelByKey.get(edge.target_key) || edge.target_key}</code>
                               </div>
                             ))}
                             {!assetGraph?.edges?.length && <div className="quiet-empty">Assets are real; relationship evidence has not been captured yet.</div>}
@@ -1368,7 +1385,7 @@ export default function Dashboard() {
                                 </div>
                                 <div className="coverage-meta">
                                   {decision.decision_type === 'execution_outcome'
-                                    ? (decision.executed_capabilities || []).map(item => `${item.tool}: ${item.outcome.replaceAll('_', ' ')}`).join(' · ') || 'No tool artifact captured'
+                                    ? formatExecutedCapabilities(decision.executed_capabilities || []) || 'No tool artifact captured'
                                     : (decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
                                 </div>
                               </div>
@@ -1531,73 +1548,68 @@ export default function Dashboard() {
             </section>
           )}
 
-          {/* ── CONTROL EVIDENCE TAB ──────────────────────── */}
+          {/* ── OWASP TEST COVERAGE TAB ───────────────────── */}
           {activeTab === 'govern' && (
             <section>
               <div className="workspace-heading">
                 <div className="workspace-heading-copy">
                   <ClipboardCheck size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
                   <div>
-                    <h2>Control Evidence</h2>
-                    <p>Versioned assessment controls backed only by persisted scope, execution and proof artifacts</p>
+                    <h2>Security Test Coverage</h2>
+                    <p>OWASP WSTG coverage derived from persisted attack-surface, execution and proof evidence</p>
                   </div>
                 </div>
-                {controlEvidence && (
+                {assurance && (
                   <span className="badge badge-informational">
-                    {controlEvidence.catalog} · v{controlEvidence.catalog_version}
+                    {assurance.catalog} · {assurance.catalog_version}
                   </span>
                 )}
               </div>
 
               {!selectedScan ? (
-                <StateView variant="empty" icon={ClipboardCheck} title="No assessment selected" body="Select an assessment to inspect its control evidence." />
-              ) : !controlEvidence ? (
-                <StateView variant="loading" title="Loading control evidence" body="Reading the persisted evidence ledger." />
+                <StateView variant="empty" icon={ClipboardCheck} title="No assessment selected" body="Select an assessment to inspect its OWASP testing coverage." />
+              ) : !assurance ? (
+                <StateView variant="loading" title="Loading test coverage" body="Projecting persisted evidence onto OWASP WSTG domains." />
               ) : (
                 <div className="control-evidence-stack">
                   <div className="evidence-disclaimer" role="note">
                     <ShieldAlert size={16} aria-hidden="true" />
                     <div>
-                      <strong>Evidence coverage, not a compliance score</strong>
-                      <span>{controlEvidence.disclaimer} Missing evidence is shown explicitly and never converted into a pass.</span>
+                      <strong>Testing coverage—not compliance and not a pass</strong>
+                      <span>{assurance.disclaimer}</span>
                     </div>
                   </div>
 
                   <div className="control-summary-grid">
-                    <MetricCard icon={ClipboardCheck} label="Evidence coverage" value={`${controlEvidence.summary.coverage_percent}%`} sub={`${controlEvidence.summary.evidenced} of ${controlEvidence.summary.total} controls`} tone="cyan" />
-                    <MetricCard icon={ShieldCheck} label="Evidenced" value={controlEvidence.summary.evidenced} sub="artifact-backed" tone="emerald" />
-                    <MetricCard icon={ShieldAlert} label="Not evidenced" value={controlEvidence.summary.not_evidenced} sub="requires assessment evidence" tone="amber" />
+                    <MetricCard icon={ShieldCheck} label="Tested domains" value={`${assurance.summary.tested}/${assurance.summary.total}`} sub="runner artifact captured" tone="emerald" />
+                    <MetricCard icon={Target} label="Observed only" value={assurance.summary.observed} sub="surface exists; test not executed" tone="cyan" />
+                    <MetricCard icon={ShieldAlert} label="Not tested" value={assurance.summary.not_tested} sub="explicit assessment gap" tone="amber" />
                   </div>
 
-                  <div className="card-glass control-ledger">
+                  <div className="card-glass assurance-console">
                     <div className="control-ledger-head">
                       <div>
-                        <h3>Evidence ledger</h3>
-                        <p>{selectedScan.name} · {selectedScan.targets.join(', ')}</p>
+                        <h3>WSTG coverage heatmap</h3>
+                        <p>{selectedScan.name} · {selectedScan.targets.join(', ')} · {assurance.summary.confirmed_proofs} confirmed behavior proofs</p>
                       </div>
-                      <span className="badge badge-idle">claim: coverage evidence only</span>
+                      <span className="badge badge-idle">claim: testing coverage only</span>
                     </div>
-                    <div className="control-list">
-                      {controlEvidence.controls.map(control => (
-                        <article className={`control-row ${control.status}`} key={control.control_id}>
-                          <div className="control-id-block">
-                            <code>{control.control_id}</code>
-                            <span>{control.family}</span>
+                    <div className="assurance-heatmap">
+                      {assurance.categories.map(category => (
+                        <article className={`assurance-cell ${category.status}`} key={category.category_id}>
+                          <div className="assurance-cell-head"><code>{category.category_id}</code><span className={`coverage-signal ${category.status}`} /></div>
+                          <strong>{category.title}</strong>
+                          <p>{category.limitation}</p>
+                          <div className="assurance-evidence">
+                            {category.executed_tools.map(tool => <span key={tool}>{tool}</span>)}
+                            {!category.executed_tools.length && category.observed_assets.map(asset => <span key={asset}>{asset}</span>)}
                           </div>
-                          <div className="control-body">
-                            <strong>{control.title}</strong>
-                            {control.status === 'evidenced' ? (
-                              <div className="evidence-ref-list">
-                                {control.evidence_refs.slice(0, 8).map(ref => <code key={ref}>{ref}</code>)}
-                              </div>
-                            ) : (
-                              <p>{control.limitation}</p>
-                            )}
-                          </div>
-                          <span className={`badge ${control.status === 'evidenced' ? 'badge-completed' : 'badge-running'}`}>
-                            {control.status === 'evidenced' ? 'evidenced' : 'not evidenced'}
-                          </span>
                         </article>
+                      ))}
+                    </div>
+                    <div className="assurance-frameworks">
+                      {assurance.frameworks.map(framework => (
+                        <a href={framework.url} target="_blank" rel="noreferrer" key={framework.name}><span>{framework.name} {framework.version}</span><small>{framework.purpose}</small></a>
                       ))}
                     </div>
                   </div>
