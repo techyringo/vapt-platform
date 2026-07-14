@@ -63,11 +63,11 @@ export function Sidebar({
 
       {/* Nav items */}
       <nav className="sidebar-nav" aria-label="Main navigation">
-        <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Assessments" count={scanCount} onClick={() => onTabChange('dashboard')} />
+        <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Command Center" count={scanCount} onClick={() => onTabChange('dashboard')} />
         <SidebarItem active={activeTab === 'appsec'}    icon={Code2}          label="Code Security"                 onClick={() => onTabChange('appsec')} />
         <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings" count={findingCount}  onClick={() => onTabChange('findings')} />
-        <SidebarItem active={activeTab === 'agents'}    icon={GitBranch}       label="Attack Paths" count={attackPathCount} onClick={() => onTabChange('agents')} />
-        <SidebarItem active={activeTab === 'govern'}    icon={ClipboardCheck}  label="Control Evidence"              onClick={() => onTabChange('govern')} />
+        <SidebarItem active={activeTab === 'agents'}    icon={GitBranch}       label="Attack Surface" count={attackPathCount} onClick={() => onTabChange('agents')} />
+        <SidebarItem active={activeTab === 'govern'}    icon={ClipboardCheck}  label="Test Coverage"              onClick={() => onTabChange('govern')} />
         <div className="sidebar-section-label">Administration</div>
         <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Operations"                    onClick={() => onTabChange('tools')} />
         <SidebarItem active={activeTab === 'config'}    icon={Settings}        label="Settings"                        onClick={() => onTabChange('config')} />

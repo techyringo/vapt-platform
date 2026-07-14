@@ -484,6 +484,15 @@ class DockerRunner:
         """Pull a Docker image and return True on success."""
         if not self._docker_available:
             return False
+        present = await self._execute_command(
+            tool_name="docker-image-inspect",
+            cmd=["docker", "image", "inspect", image],
+            input_data=None,
+            timeout=30,
+        )
+        if present.success:
+            logger.debug("[Docker] Image already present: {img}", img=image)
+            return True
         logger.info("[Docker] Pulling {img}", img=image)
         result = await self._execute_command(
             tool_name="docker-pull",
