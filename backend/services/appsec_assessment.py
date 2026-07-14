@@ -109,6 +109,8 @@ def repository_inventory(workspace: Path) -> dict[str, object]:
         "Dockerfile", "docker-compose.yml", "docker-compose.yaml",
     }
     files_scanned = 0
+    codeowners_path = ""
+    codeowners: set[str] = set()
     for path in workspace.rglob("*"):
         if not path.is_file() or ".git" in path.parts:
             continue
@@ -118,15 +120,26 @@ def repository_inventory(workspace: Path) -> dict[str, object]:
             languages[language] += 1
         if path.name in manifest_names:
             manifests.add(path.name)
+        if path.name == "CODEOWNERS" and not codeowners_path:
+            codeowners_path = str(path.relative_to(workspace))
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines()[:2000]:
+                if not line.strip() or line.lstrip().startswith("#"):
+                    continue
+                codeowners.update(token for token in line.split()[1:] if token.startswith("@"))
     return {
         "files": files_scanned,
         "languages": dict(languages.most_common(12)),
         "manifests": sorted(manifests),
+        "ownership": {
+            "codeowners_file": codeowners_path,
+            "owners": sorted(codeowners)[:100],
+            "configured": bool(codeowners_path),
+        },
     }
 
 
 def semgrep_rulepacks() -> list[str]:
-    configured = os.environ.get("VAPT_SEMGREP_RULESETS", "p/default,p/security-audit")
+    configured = os.environ.get("VAPT_SEMGREP_RULESETS", "p/default,p/security-audit,p/owasp-top-ten,p/secrets")
     return list(dict.fromkeys(value.strip() for value in configured.split(",") if value.strip()))[:8]
 
 
@@ -174,6 +187,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
     coverage: dict[str, dict] = {
         "sast": {"status": "planned", "tool": "semgrep", "findings": 0},
         "sca": {"status": "planned", "tool": "trivy", "findings": 0},
+        "iac": {"status": "planned", "tool": "trivy", "findings": 0},
         "secrets": {"status": "planned", "tool": "gitleaks + trufflehog", "findings": 0},
     }
     store.update_appsec_assessment(assessment_id, {"status": "running", "phase": "checkout", "progress": 5})
@@ -185,6 +199,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             "languages": inventory["languages"],
             "files": inventory["files"],
             "rulepacks": rulepacks,
+            "ownership": inventory["ownership"],
         })
         coverage["sca"].update({"manifests": inventory["manifests"]})
         store.update_appsec_assessment(assessment_id, {"commit_sha": revision, "phase": "sast", "progress": 15})
@@ -204,6 +219,8 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         for index, (tool, lane, args, parser) in enumerate(scanners, start=1):
             tool_log_context.set({"scan_id": assessment_id, "agent": "appsec", "phase": lane})
             coverage[lane]["status"] = "running"
+            if lane == "sca":
+                coverage["iac"]["status"] = "running"
             store.update_appsec_assessment(assessment_id, {"phase": lane, "progress": 15 + index * 20, "coverage": coverage})
             result = await runner.run_local(tool, args, timeout=900)
             store.append_appsec_run(assessment_id, lane, result.to_dict())
@@ -212,18 +229,31 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
                 parsed = parser(payload, repository)
                 findings.extend(parsed)
                 findings = _deduplicate_findings(findings)
-                coverage[lane].update({"status": "completed", "findings": len(parsed)})
+                lane_findings = [item for item in parsed if item.get("category") == lane]
+                coverage[lane].update({"status": "completed", "findings": len(lane_findings) if lane == "sca" else len(parsed)})
                 coverage[lane]["duration_seconds"] = round(result.duration, 2)
                 if lane == "sast":
                     coverage[lane].update(semgrep_coverage(payload, inventory, result.duration))
+                if lane == "sca":
+                    iac_findings = [item for item in parsed if item.get("category") == "iac"]
+                    coverage["iac"].update({
+                        "status": "completed",
+                        "findings": len(iac_findings),
+                        "duration_seconds": round(result.duration, 2),
+                        "manifests": inventory["manifests"],
+                    })
             elif result.success:
                 coverage[lane].update({
                     "status": "partial",
                     "duration_seconds": round(result.duration, 2),
                     "limitation": "Scanner exited successfully but produced no machine-readable evidence.",
                 })
+                if lane == "sca":
+                    coverage["iac"].update(coverage[lane])
             else:
                 coverage[lane].update({"status": "unavailable", "error": (result.stderr or "Scanner unavailable")[-500:]})
+                if lane == "sca":
+                    coverage["iac"].update({"status": "unavailable", "error": coverage[lane]["error"]})
             store.replace_appsec_findings(assessment_id, findings)
             unavailable_now = [name for name, state in coverage.items() if state["status"] in {"unavailable", "partial"}]
             store.update_appsec_assessment(assessment_id, {
