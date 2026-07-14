@@ -73,6 +73,9 @@ export interface ToolRun {
   phase: string;
   tool: string;
   success: boolean;
+  partial?: boolean;
+  evidence_captured?: boolean;
+  outcome?: 'completed' | 'partial' | 'timed_out' | 'resource_exhausted' | 'failed';
   exit_code: number;
   duration: number;
   timed_out: boolean;
@@ -197,6 +200,15 @@ export interface AgentDecision {
   model_trace: { used: boolean; provider: string; model: string; error: string };
   policy?: { decision_authority?: string; model_role?: string };
   execution?: { mode: string; automatically_executed: boolean; note: string };
+  decision_type?: 'adaptive_capability_plan' | 'execution_outcome';
+  executed_capabilities?: Array<{
+    tool: string;
+    outcome: 'completed' | 'partial' | 'timed_out' | 'resource_exhausted' | 'failed';
+    duration: number;
+    evidence_captured: boolean;
+    exit_code: number;
+  }>;
+  recovery_actions?: Array<{ tool: string; action: string }>;
 }
 
 export interface AttackChain {
@@ -224,6 +236,7 @@ export interface CoverageCheck {
   expected_tools: string[];
   tools_observed?: string[];
   successful_tools?: string[];
+  partial_tools?: string[];
   notes?: string;
 }
 
@@ -233,6 +246,7 @@ export interface ScanCoverage {
     total: number;
     completed: number;
     running: number;
+    partial?: number;
     blind_spots: number;
   };
   checks: CoverageCheck[];

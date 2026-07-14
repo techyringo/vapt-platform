@@ -278,6 +278,23 @@ class ToolResult:
         return self.exit_code == 0 and not self.timed_out
 
     @property
+    def partial(self) -> bool:
+        """Whether a failed/expired process still produced usable evidence."""
+        return self.timed_out and bool(self.stdout.strip())
+
+    @property
+    def outcome(self) -> str:
+        if self.success:
+            return "completed"
+        if self.partial:
+            return "partial"
+        if self.timed_out:
+            return "timed_out"
+        if self.oom_killed:
+            return "resource_exhausted"
+        return "failed"
+
+    @property
     def output(self) -> str:
         return self.stdout
 
@@ -286,6 +303,9 @@ class ToolResult:
             "tool": self.tool_name,
             "exit_code": self.exit_code,
             "success": self.success,
+            "partial": self.partial,
+            "evidence_captured": self.success or self.partial,
+            "outcome": self.outcome,
             "duration": self.duration,
             "timed_out": self.timed_out,
             "command_preview": self.command_preview,

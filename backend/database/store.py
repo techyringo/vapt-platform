@@ -757,13 +757,18 @@ class PersistenceStore:
 
     @staticmethod
     def _tool_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        success = bool(row["success"])
+        partial = not success and bool(row["timed_out"]) and int(row["stdout_size"] or 0) > 0
         return {
             "id": row["id"],
             "scan_id": row["scan_id"],
             "agent_type": row["agent_type"],
             "phase": row["phase"],
             "tool": row["tool"],
-            "success": bool(row["success"]),
+            "success": success,
+            "partial": partial,
+            "evidence_captured": success or partial,
+            "outcome": "completed" if success else "partial" if partial else "timed_out" if row["timed_out"] else "failed",
             "exit_code": row["exit_code"],
             "duration": row["duration"],
             "timed_out": bool(row["timed_out"]),

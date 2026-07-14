@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import re
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -49,6 +50,51 @@ def _event_redis_url() -> str:
 
 _pub_client: Any = None
 _pub_disabled = False
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[:=]\s*)([^\s,;]+)"
+)
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)(\b(?:authorization|cookie|set-cookie)\b\s*[:=]\s*)([^\r\n]+)"
+)
+
+
+def redact_tool_log_line(line: str) -> str:
+    """Bound and redact a live line before it reaches console or SSE output."""
+    bounded = str(line).replace("\x00", "")[:2000]
+    bounded = _HEADER_SECRET_RE.sub(r"\1<redacted>", bounded)
+    return _SECRET_VALUE_RE.sub(r"\1<redacted>", bounded)
+
+
+def _mirror_tool_log(msg: dict[str, Any]) -> None:
+    """Mirror sampled tool output into worker/API container logs."""
+    enabled = os.environ.get("VAPT_TOOL_LOG_MIRROR", "true").lower() in {"1", "true", "yes"}
+    if not enabled:
+        return
+    try:
+        configured_max = int(os.environ.get("VAPT_TOOL_LOG_MIRROR_MAX_CHARS", "1000"))
+    except ValueError:
+        configured_max = 1000
+    max_chars = max(120, min(configured_max, 2000))
+    rendered = str(msg.get("line") or "")[:max_chars]
+    lowered = rendered.lower()
+    if re.search(r"(?:fatal|exception|traceback|\berror\b|\bfailed\b)", lowered):
+        log = logger.error
+    elif re.search(r"(?:warn|timed?\s*out|rate.?limit|retry)", lowered):
+        log = logger.warning
+    else:
+        # Many CLI tools write normal progress to stderr; the stream alone is
+        # not a reliable severity signal.
+        log = logger.info
+    log(
+        "[tool_stream] scan={scan} agent={agent} phase={phase} tool={tool} stream={stream} | {line}",
+        scan=msg.get("scan_id", ""),
+        agent=msg.get("agent", ""),
+        phase=msg.get("phase", ""),
+        tool=msg.get("tool", ""),
+        stream=msg.get("stream", "stdout"),
+        line=rendered,
+    )
 
 
 async def _get_publisher() -> Any:
@@ -85,18 +131,19 @@ async def publish_tool_log(
     """Best-effort publish of one tool-log line. Never raises."""
     if not scan_id or not line:
         return
-    client = await _get_publisher()
-    if client is None:
-        return
     msg = {
         "scan_id": scan_id,
         "tool": tool,
         "agent": agent,
         "phase": phase,
         "stream": stream,
-        "line": line[:2000],
+        "line": redact_tool_log_line(line),
         "ts": time.time(),
     }
+    _mirror_tool_log(msg)
+    client = await _get_publisher()
+    if client is None:
+        return
     try:
         await client.publish(TOOL_LOG_CHANNEL, json.dumps(msg))
     except Exception as exc:

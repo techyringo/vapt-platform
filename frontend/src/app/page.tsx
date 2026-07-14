@@ -167,27 +167,33 @@ function eventLog(event: SSEEvent): LogMessage | null {
   const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
   if (event.type === 'ping') return null;
   if (event.type === 'finding') {
-    return { msg: `Finding: ${event.title || 'new issue'} on ${event.target_host || event.scan_id || 'target'}`, level: event.severity || 'info', time };
+    return { msg: `${event.title || 'new issue'} on ${event.target_host || event.scan_id || 'target'}`, level: event.severity || 'info', time, source: 'finding', eventType: event.type };
   }
   if (event.type === 'agent_status') {
     const key    = event.agent_type || event.data?.agent_type || 'agent';
     const status = event.status     || event.data?.status     || 'updated';
     const count  = event.findings_count || event.data?.findings_count;
-    return { msg: `${key} ${status}${count ? ` (${count} findings)` : ''}`, level: status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info', time };
+    return { msg: `${status}${count ? ` (${count} findings)` : ''}`, level: status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info', time, source: key, eventType: event.type };
   }
   if (event.type === 'log') {
-    return { msg: event.message || event.data?.message || '', level: event.level || event.data?.level || 'info', time };
+    return { msg: event.message || event.data?.message || '', level: event.level || event.data?.level || 'info', time, source: event.agent || event.data?.agent || 'platform', phase: event.phase || event.data?.phase, eventType: event.type };
   }
   if (event.type === 'tool_log') {
     const tool = event.tool || event.data?.tool || 'tool';
     const line = event.line || event.data?.line || '';
     if (!line) return null;
-    const stream = event.stream || event.data?.stream;
-    return { msg: `[${tool}] ${line}`, level: stream === 'stderr' ? 'warn' : 'info', time };
+    const stream = event.stream || event.data?.stream || 'stdout';
+    const lower = String(line).toLowerCase();
+    const level = /(?:fatal|exception|traceback|\berror\b|\bfailed\b)/.test(lower)
+      ? 'error'
+      : /(?:warn|timed?\s*out|rate.?limit|retry)/.test(lower)
+        ? 'warn'
+        : 'info';
+    return { msg: line, level, time, source: tool, phase: event.phase || event.data?.phase, stream, eventType: event.type };
   }
   if (event.type === 'phase_change') {
     const phase = event.phase || event.data?.phase;
-    return phase ? { msg: `Phase changed → ${formatPhase(phase)}`, level: 'info', time } : null;
+    return phase ? { msg: `Started ${formatPhase(phase)}`, level: 'info', time, source: 'orchestrator', phase, eventType: event.type } : null;
   }
   if (event.type === 'phase_complete' || event.type === 'surface_update') {
     const health = event.target_health?.status;
@@ -655,7 +661,8 @@ export default function Dashboard() {
 
   const priorityFindings   = [...verifiedFindings, ...sortedFindings.filter(item => !verifiedFindings.includes(item))].slice(0, 8);
   const agentEntries       = useMemo(() => Object.entries(agentStatus), [agentStatus]);
-  const failedToolRuns     = useMemo(() => toolRuns.filter(run => !run.success), [toolRuns]);
+  const partialToolRuns    = useMemo(() => toolRuns.filter(run => run.partial), [toolRuns]);
+  const failedToolRuns     = useMemo(() => toolRuns.filter(run => !run.success && !run.partial), [toolRuns]);
   const totalFindings      = Object.values(severityCounts).reduce((s, v) => s + v, 0);
   const posture            = riskPosture(severityCounts);
   const targetCount        = useMemo(() => {
@@ -1234,12 +1241,12 @@ export default function Dashboard() {
                     <div className="card-glass" style={{ padding: 14 }}>
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
                         <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Evidence-driven Recommendations</h3>
+                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Decision Ledger</h3>
                           <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            Engagement policy decides eligibility; AI can only rank approved capabilities
+                            Approved recommendations paired with observed execution outcomes
                           </p>
                         </div>
-                        <span className="badge badge-informational">{decisions.length} phase{decisions.length === 1 ? '' : 's'}</span>
+                        <span className="badge badge-informational">{decisions.length} entr{decisions.length === 1 ? 'y' : 'ies'}</span>
                       </div>
                       {decisions.length === 0 ? (
                         <div className="quiet-empty">Recommendations appear as each phase begins. They are recorded for review and are not silently executed.</div>
@@ -1248,19 +1255,25 @@ export default function Dashboard() {
                           {[...decisions].reverse().slice(0, 6).map(decision => (
                             <div key={decision.decision_id} className="coverage-row">
                               <div style={{ minWidth: 0 }}>
-                                <div className="coverage-title">{formatPhase(decision.phase)}</div>
+                                <div className="coverage-title">
+                                  {formatPhase(decision.phase)} · {decision.decision_type === 'execution_outcome' ? 'observed outcome' : 'approved plan'}
+                                </div>
                                 <div className="coverage-meta">
-                                  {(decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
+                                  {decision.decision_type === 'execution_outcome'
+                                    ? (decision.executed_capabilities || []).map(item => `${item.tool}: ${item.outcome.replaceAll('_', ' ')}`).join(' · ') || 'No tool artifact captured'
+                                    : (decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
                                 </div>
                               </div>
-                              <span className="badge badge-informational">{decision.execution?.automatically_executed ? 'executed' : decision.status}</span>
+                              <span className={`badge ${decision.status === 'completed' ? 'badge-completed' : decision.status === 'failed' ? 'badge-failed' : 'badge-informational'}`}>
+                                {decision.status}
+                              </span>
                             </div>
                           ))}
                         </div>
                       )}
                       {decisions.length > 0 && (
                         <div className="quiet-empty" style={{ marginTop: 10 }}>
-                          Current mode: advisory. Runtime execution remains the deterministic phase plan until the policy-bound action loop is completed.
+                          Policy owns execution. AI ranks only eligible actions; every real run and recovery recommendation is written back here.
                         </div>
                       )}
                     </div>
@@ -1324,7 +1337,7 @@ export default function Dashboard() {
 	                        <div>
                           <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Assessment Completeness</h3>
 	                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} limitations
+                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.partial || 0} partial · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} limitations
 	                          </p>
 	                        </div>
 	                        <span className={`badge ${(coverage.summary.blind_spots || 0) ? 'badge-failed' : 'badge-completed'}`}>
@@ -1340,7 +1353,7 @@ export default function Dashboard() {
 	                                {check.phase} · {(check.successful_tools?.length ? check.successful_tools : check.tools_observed || check.expected_tools || []).join(', ') || 'no tool evidence'}
 	                              </div>
 	                            </div>
-	                            <span className={`badge ${check.status === 'completed' ? 'badge-completed' : check.status === 'running' ? 'badge-running' : 'badge-idle'}`}>
+	                            <span className={`badge ${check.status === 'completed' ? 'badge-completed' : check.status === 'running' || check.status === 'partial' ? 'badge-running' : 'badge-idle'}`}>
 	                              {check.status.replaceAll('_', ' ')}
 	                            </span>
 	                          </div>
@@ -1354,7 +1367,7 @@ export default function Dashboard() {
                       <div>
                         <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Runs</h3>
                         <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {toolRuns.length} captured · {failedToolRuns.length} failed
+                          {toolRuns.length} captured · {partialToolRuns.length} partial · {failedToolRuns.length} failed
                         </p>
                       </div>
                       <button
@@ -1371,7 +1384,7 @@ export default function Dashboard() {
                         {[...toolRuns].sort((a, b) => Number(a.success) - Number(b.success) || b.id - a.id).slice(0, 80).map(run => {
                           const snippet = run.stderr_snippet || run.stdout_snippet || '';
                           return (
-                            <div key={run.id} className={`tool-run-row${run.success ? '' : ' failed'}`}>
+                            <div key={run.id} className={`tool-run-row${run.partial ? ' partial' : run.success ? '' : ' failed'}`}>
 	                              <div className="tool-run-head">
 	                                <span className="tool-run-name">{run.tool}</span>
 	                                <div className="tool-run-actions">
@@ -1385,8 +1398,8 @@ export default function Dashboard() {
 	                                      <Download size={12} aria-hidden="true" />stderr
 	                                    </a>
 	                                  )}
-	                                  <span className={`badge ${run.success ? 'badge-completed' : 'badge-failed'}`}>
-	                                    {run.success ? 'ok' : `exit ${run.exit_code}`}
+	                                  <span className={`badge ${run.success ? 'badge-completed' : run.partial ? 'badge-running' : 'badge-failed'}`}>
+	                                    {run.success ? 'complete' : run.partial ? 'partial evidence' : run.timed_out ? 'timed out' : `exit ${run.exit_code}`}
 	                                  </span>
 	                                </div>
 	                              </div>

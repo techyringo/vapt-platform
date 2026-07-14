@@ -202,7 +202,11 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         store.update_appsec_assessment(assessment_id, {"phase": lane, "progress": 70, "coverage": coverage})
         result = await runner.run_local(
             "gitleaks",
-            ["detect", "--source", container_workspace, "--no-git", "--report-format", "json", "--report-path", container_report, "--no-banner"],
+            [
+                "detect", "--source", container_workspace, "--no-git",
+                "--report-format", "json", "--report-path", container_report,
+                "--exit-code", "0", "--no-banner",
+            ],
             timeout=600,
         )
         store.append_appsec_run(assessment_id, lane, result.to_dict())

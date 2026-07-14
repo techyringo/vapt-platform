@@ -975,6 +975,10 @@ body::after {
   border-color: rgba(248,113,113,0.35);
   background: rgba(248,113,113,0.06);
 }
+.tool-run-row.partial {
+  border-color: rgba(234,179,8,0.4);
+  background: rgba(234,179,8,0.06);
+}
 .tool-run-head {
   display: flex;
   align-items: center;
@@ -1286,7 +1290,7 @@ select.field option { background: var(--bg-elevated); color: var(--text-primary)
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--terminal-bg);
-  padding: 12px;
+  padding: 8px;
   font-family: var(--font-jetbrains), 'JetBrains Mono', ui-monospace, monospace;
   font-size: 11px;
   line-height: 1.72;
@@ -1295,18 +1299,80 @@ select.field option { background: var(--bg-elevated); color: var(--text-primary)
 
 .log-line {
   display: grid;
-  grid-template-columns: 62px 13px minmax(0, 1fr);
+  grid-template-columns: 68px 14px minmax(68px, auto) minmax(0, 1fr);
   gap: 8px;
   align-items: start;
-  padding: 1px 6px 1px 8px;
-  margin-left: -6px;
+  padding: 5px 8px;
   border-left: 2px solid transparent;
-  border-radius: 0 3px 3px 0;
+  border-radius: 4px;
 }
+.log-line:nth-child(even) { background: rgba(148,163,184,0.025); }
+.log-line:hover { background: rgba(34,211,238,0.045); }
 .log-line.error   { border-left-color: rgba(244, 63,  94,  0.65); }
 .log-line.warn    { border-left-color: rgba(234, 179, 8,   0.65); }
 .log-line.success { border-left-color: rgba(34,  197, 94,  0.65); }
 .log-line.info    { border-left-color: rgba(34,  211, 238, 0.4);  }
+.log-line.error .log-icon { color: var(--critical); }
+.log-line.warn .log-icon { color: var(--medium); }
+.log-line.success .log-icon { color: var(--low); }
+.log-line.info .log-icon { color: var(--accent); }
+.log-time { color: var(--text-muted); user-select: none; font-variant-numeric: tabular-nums; }
+.log-icon { display: inline-flex; margin-top: 2px; }
+.log-source {
+  max-width: 130px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 0 5px;
+  color: var(--text-secondary);
+  background: var(--bg-elevated);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.log-source.tool { border-color: rgba(34,211,238,.25); color: var(--accent); }
+.log-message { min-width: 0; color: var(--text-secondary); overflow-wrap: anywhere; white-space: pre-wrap; }
+.live-feed-card { padding: 14px; }
+.live-feed-header,
+.live-feed-toolbar,
+.live-feed-title,
+.live-feed-status,
+.live-feed-filters,
+.live-feed-search,
+.live-feed-pause { display: flex; align-items: center; }
+.live-feed-header { justify-content: space-between; gap: 12px; margin-bottom: 10px; }
+.live-feed-title { gap: 8px; color: var(--accent); }
+.live-feed-title > div { display: grid; gap: 1px; }
+.live-feed-title strong { color: var(--text-primary); font-size: 13px; }
+.live-feed-title span { color: var(--text-muted); font-size: 10px; }
+.live-feed-status { gap: 6px; }
+.live-feed-toolbar { gap: 8px; margin-bottom: 8px; }
+.live-feed-filters { gap: 3px; padding: 3px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-elevated); }
+.live-feed-filters button,
+.live-feed-pause {
+  min-height: 26px;
+  border: 0;
+  border-radius: 5px;
+  padding: 4px 8px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: capitalize;
+  cursor: pointer;
+}
+.live-feed-filters button.active { background: rgba(34,211,238,.1); color: var(--accent); }
+.live-feed-search { flex: 1; gap: 6px; min-width: 130px; border: 1px solid var(--border); border-radius: 7px; padding: 0 8px; color: var(--text-muted); background: var(--bg-elevated); }
+.live-feed-search input { width: 100%; min-height: 32px; border: 0; outline: 0; color: var(--text-primary); background: transparent; font-size: 10px; }
+.live-feed-pause { gap: 5px; border: 1px solid var(--border); background: var(--bg-elevated); }
+.live-feed-empty { padding: 30px 12px; text-align: center; color: var(--text-muted); }
+
+@media (max-width: 720px) {
+  .live-feed-toolbar { flex-wrap: wrap; }
+  .live-feed-search { order: 3; flex-basis: 100%; }
+  .log-line { grid-template-columns: 58px 14px minmax(56px, auto) minmax(0, 1fr); gap: 5px; }
+}
 
 /* ═══════════════════════════════════════════════════════════════════
    MISC UTILITIES

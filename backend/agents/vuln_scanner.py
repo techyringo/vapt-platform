@@ -46,6 +46,7 @@ class VulnScannerAgent(BaseAgent):
         self._cve_resolver = None  # lazily built — see _get_cve_resolver
         self._warned_missing_nuclei_templates = False
         self._llm_hypotheses: list[dict[str, Any]] = []
+        self._observations: list[dict[str, Any]] = []
 
     def _get_cve_resolver(self):
         """Lazily build the LLM+NVD resolver so nuclei-derived CVEs are
@@ -72,6 +73,7 @@ class VulnScannerAgent(BaseAgent):
         self.clear_findings()
         self.clear_tool_runs()
         self._llm_hypotheses = []
+        self._observations = []
 
         recon_data = task.parameters.get("recon_data", task.result or {})
         enum_data = task.parameters.get("enum_data", {})
@@ -161,6 +163,8 @@ class VulnScannerAgent(BaseAgent):
             "technologies": technologies,
             "tool_runs": self.get_tool_runs(),
             "llm_hypotheses": self._llm_hypotheses,
+            "observations": self._observations,
+            "total_observations": len(self._observations),
             "total_vulnerabilities": len(self._findings),
         }
 
@@ -1151,7 +1155,7 @@ class VulnScannerAgent(BaseAgent):
     def _convert_nuclei_findings(self, nuclei_results: list[dict], target: Target) -> None:
         """Convert nuclei results to Finding objects."""
         for nuc in nuclei_results:
-            severity_str = nuc.get("severity", "informational")
+            severity_str = str(nuc.get("severity", "informational")).lower()
             severity_map = {
                 "critical": Severity.CRITICAL,
                 "high": Severity.HIGH,
@@ -1188,6 +1192,23 @@ class VulnScannerAgent(BaseAgent):
             refs = nuc.get("reference", [])
             if isinstance(refs, str):
                 refs = [refs]
+
+            # Nuclei informational templates are valuable technology and
+            # inventory evidence, but they are not vulnerabilities. Keep them
+            # available as phase evidence without inflating risk counts.
+            if severity_str in {"informational", "info"}:
+                self._record_observation(
+                    source="nuclei",
+                    category="technology_or_inventory",
+                    title=nuc.get("template_name", nuc.get("template_id", "Scanner observation")),
+                    target_url=url or target.base_url,
+                    evidence="\n".join(nuc.get("extracted_results", [])) or nuc.get("matched_at", ""),
+                    metadata={
+                        "template_id": nuc.get("template_id", ""),
+                        "tags": nuc.get("tags", []),
+                    },
+                )
+                continue
 
             finding = Finding(
                 title=nuc.get("template_name", nuc.get("template_id", "Unknown Vulnerability")),
@@ -1278,7 +1299,8 @@ class VulnScannerAgent(BaseAgent):
             "info": Severity.INFORMATIONAL,
         }
         for cms in cms_findings:
-            informational = bool(cms.get("informational"))
+            scanner_severity = str(cms.get("severity") or "").lower()
+            informational = bool(cms.get("informational")) or scanner_severity in {"info", "informational"}
             component = str(cms.get("component") or "cms").lower()
             cve_ids = cms.get("cve") or []
             if isinstance(cve_ids, str):
@@ -1298,14 +1320,23 @@ class VulnScannerAgent(BaseAgent):
             elif isinstance(references, str):
                 references = [references]
 
+            if informational:
+                self._record_observation(
+                    source=str(cms.get("source_tool") or "cms-scanner"),
+                    category="cms_inventory",
+                    title=str(cms.get("finding") or "CMS scanner observation")[:200],
+                    target_url=str(cms.get("target_url") or target.url or target.base_url),
+                    evidence=str(cms.get("finding") or ""),
+                    metadata={"component": component, "references": references[:10]},
+                )
+                continue
+
             finding = Finding(
                 title=(
-                    f"CMS Scan Evidence: {cms.get('finding', '')[:80]}"
-                    if informational else
                     f"CMS Vulnerability: {cms.get('finding', '')[:80]}"
                 ),
                 description=cms.get("finding", ""),
-                severity=Severity.INFORMATIONAL if informational else severity_map.get(str(cms.get("severity", "high")).lower(), Severity.HIGH),
+                severity=severity_map.get(str(cms.get("severity", "high")).lower(), Severity.HIGH),
                 agent_source=AgentType.VULN_SCANNER,
                 target=Target(host=urlparse(cms.get("target_url", "")).hostname or target.host, url=cms.get("target_url") or target.url),
                 evidence=cms.get("finding", ""),
@@ -1314,12 +1345,39 @@ class VulnScannerAgent(BaseAgent):
                 references=references,
                 cve_ids=cve_ids,
                 cwe_ids=cwe_ids,
-                tags=["cms", component, cms.get("source_tool", "cms-scanner"), "scanner-evidence" if informational else "vulnerability"],
-                confidence="high",
-                status="confirmed",
+                tags=["cms", component, cms.get("source_tool", "cms-scanner"), "vulnerability"],
+                confidence="high" if cve_ids else "medium",
+                status="confirmed" if cve_ids else "suspected",
                 raw_tool_output=json.dumps(cms, default=str),
             )
             self._add_finding(finding)
+
+    def _record_observation(
+        self,
+        *,
+        source: str,
+        category: str,
+        title: str,
+        target_url: str,
+        evidence: str = "",
+        metadata: dict[str, Any] | None = None,
+    ) -> None:
+        """Capture non-actionable scanner evidence outside the finding ledger."""
+        observation = {
+            "source": source,
+            "category": category,
+            "title": str(title)[:300],
+            "target_url": str(target_url)[:2000],
+            "evidence": str(evidence)[:5000],
+            "metadata": metadata or {},
+        }
+        self._observations.append(observation)
+        logger.info(
+            "[VULN_SCAN] Observation captured: source={source} category={category} title={title}",
+            source=source,
+            category=category,
+            title=observation["title"][:120],
+        )
 
     async def _run_custom_checks(self, targets: list[str], technologies: dict, target: Target) -> None:
         """Run custom vulnerability checks beyond template scanners.

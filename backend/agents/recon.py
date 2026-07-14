@@ -280,10 +280,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="amass",
             args=["enum", "-passive", "-d", domain, "-o", "/dev/stdout"] + extra_args,
-            timeout=600,
+            timeout=max(30, int(os.environ.get("VAPT_AMASS_TIMEOUT", "180"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success:
+        if result.stdout.strip():
             subs = OutputParser.parse_subfinder(result.stdout)
             logger.info("[RECON] amass: {count} subdomains", count=len(subs))
             return subs
@@ -295,10 +295,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="assetfinder",
             args=["--subs-only", domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_ASSETFINDER_TIMEOUT", "120"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             subs = OutputParser.parse_subfinder(result.stdout)
             logger.info("[RECON] assetfinder: {count} subdomains", count=len(subs))
             return subs
@@ -518,10 +518,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="waybackurls",
             args=[domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_WAYBACK_TIMEOUT", "120"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
             logger.info("[RECON] waybackurls: {count} URLs", count=len(urls))
             return urls
@@ -532,10 +532,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="gau",
             args=["--subs", "--threads", "5", domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "180"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
             logger.info("[RECON] gau: {count} URLs", count=len(urls))
             return urls
@@ -596,7 +596,6 @@ class ReconAgent(BaseAgent):
             return []
         finally:
             try:
-                import os
                 os.unlink(host_path)
             except OSError:
                 pass
