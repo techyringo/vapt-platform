@@ -30,6 +30,7 @@ stored on ``app.state``.
 
 import asyncio
 import copy
+import hashlib
 import os
 import re
 import json
@@ -41,7 +42,7 @@ from urllib.parse import urlparse, urlunparse
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
 from pydantic import BaseModel
@@ -1279,6 +1280,39 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         mgr = get_manager(app)
         return {"modes": mgr.get_scan_modes()}
 
+    # ── Controlled out-of-band validation callbacks ─────────────────
+
+    @app.api_route("/api/oob/c/{token}", methods=["GET", "POST", "PUT", "HEAD"])
+    async def capture_oob_callback(token: str, request: Request):
+        """Capture a bounded HTTP interaction for an issued DAST proof token."""
+        if not re.fullmatch(r"[a-f0-9]{32}", token):
+            raise HTTPException(status_code=404, detail="Callback token not found")
+        source = request.client.host if request.client else "unknown"
+        interaction = {
+            "method": request.method,
+            "path": request.url.path,
+            "source_sha256": hashlib.sha256(source.encode()).hexdigest()[:16],
+            "user_agent": str(request.headers.get("user-agent") or "")[:300],
+            "content_type": str(request.headers.get("content-type") or "")[:120],
+            "observed_at": datetime.utcnow().isoformat(),
+        }
+        if not get_appsec_store(app).record_oob_interaction(token, interaction):
+            raise HTTPException(status_code=404, detail="Callback token not found or expired")
+        return Response(status_code=204)
+
+    @app.get("/api/oob/status/{token}")
+    async def get_oob_callback_status(token: str):
+        if not re.fullmatch(r"[a-f0-9]{32}", token):
+            raise HTTPException(status_code=404, detail="Callback token not found")
+        item = get_appsec_store(app).load_oob_token(token)
+        if not item:
+            raise HTTPException(status_code=404, detail="Callback token not found")
+        return {
+            "interacted": bool(item.get("interacted_at")),
+            "interacted_at": item.get("interacted_at"),
+            "interaction": item.get("interaction") or {},
+        }
+
     # ─── Unified application-security assessments ───────────────
 
     @app.post("/api/appsec/assessments", status_code=202)
@@ -1343,6 +1377,39 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if not assessment:
             raise HTTPException(status_code=404, detail="Application-security assessment not found")
         return assessment
+
+    @app.get("/api/appsec/assessments/{assessment_id}/sarif")
+    async def export_appsec_sarif(assessment_id: str):
+        """Export the normalized code evidence ledger as SARIF 2.1.0."""
+        from services.appsec_assessment import assessment_to_sarif
+
+        assessment = get_appsec_store(app).load_appsec_assessment(assessment_id)
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Application-security assessment not found")
+        content = json.dumps(assessment_to_sarif(assessment), indent=2, ensure_ascii=True)
+        filename = f"{assessment_id}.sarif.json"
+        return Response(
+            content=content,
+            media_type="application/sarif+json",
+            headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        )
+
+    @app.get("/api/appsec/assessments/{assessment_id}/artifacts/{kind}")
+    async def download_appsec_artifact(assessment_id: str, kind: str):
+        """Download a retained AppSec artifact such as the CycloneDX SBOM."""
+        store = get_appsec_store(app)
+        artifact = store.load_appsec_artifact(assessment_id, kind)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Application-security artifact not found")
+        path = Path(str(artifact.get("path") or "")).resolve()
+        root = store.artifact_root.resolve()
+        if not path.is_file() or root not in path.parents:
+            raise HTTPException(status_code=404, detail="Application-security artifact is unavailable")
+        return FileResponse(
+            path=str(path),
+            filename=str(artifact.get("filename") or path.name),
+            media_type="application/json",
+        )
 
     # ─── Scan Management ────────────────────────────────────────
 
@@ -1456,6 +1523,22 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             raise HTTPException(status_code=404, detail="Scan not found")
         runs = mgr.get_tool_runs(scan_id)
         return {"scan_id": scan_id, "total": len(runs), "tool_runs": runs}
+
+    @app.get("/api/scans/{scan_id}/operation")
+    async def get_scan_operation(scan_id: str):
+        """Return durable actions, checkpoints and replay cursor for Mission Control."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return mgr.get_operation(scan_id)
+
+    @app.get("/api/scans/{scan_id}/control-evidence")
+    async def get_scan_control_evidence(scan_id: str):
+        """Project real scan artifacts onto versioned internal evidence controls."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        return mgr.get_control_evidence(scan_id)
 
     @app.get("/api/scans/{scan_id}/tool-runs/{run_id}/artifact")
     async def download_tool_artifact(scan_id: str, run_id: int, stream: str = "stdout"):
@@ -1833,7 +1916,12 @@ th {{ background: #eef3f8; }}
         scan_failed, ping.
         """
         mgr = get_manager(app)
-        queue = mgr.subscribe_events()
+        last_event_id = request.headers.get("last-event-id", "0")
+        try:
+            after_sequence = max(0, int(last_event_id or 0))
+        except ValueError:
+            after_sequence = 0
+        queue = mgr.subscribe_events(after_sequence=after_sequence)
 
         async def event_generator():
             try:
@@ -1847,7 +1935,10 @@ th {{ background: #eef3f8; }}
                     try:
                         data = await asyncio.wait_for(queue.get(), timeout=30)
                         event_type = data.get("event") or data.get("type") or "message"
-                        yield {"event": event_type, "data": json.dumps(data)}
+                        event = {"event": event_type, "data": json.dumps(data)}
+                        if data.get("sequence"):
+                            event["id"] = str(data["sequence"])
+                        yield event
                     except asyncio.TimeoutError:
                         yield {"event": "ping", "data": json.dumps({"event": "ping", "type": "ping"})}
             except asyncio.CancelledError:

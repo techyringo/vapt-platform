@@ -91,6 +91,75 @@ export interface ToolRun {
   created_at: string;
 }
 
+export interface DurableAction {
+  action_id: string;
+  scan_id: string;
+  phase: string;
+  capability: string;
+  tool: string;
+  status: 'queued' | 'running' | 'completed' | 'partial' | 'retrying' | 'timed_out' | 'resource_exhausted' | 'failed';
+  attempt: number;
+  max_attempts: number;
+  reason: string;
+  runner: string;
+  result: Record<string, any>;
+  checkpoint: Record<string, any>;
+  error: string;
+  queued_at: string;
+  started_at?: string;
+  heartbeat_at?: string;
+  completed_at?: string;
+  updated_at: string;
+}
+
+export interface DurableOperation {
+  operation_id: string;
+  scan_id: string;
+  status: string;
+  current_phase: string;
+  reconnect_cursor: number;
+  summary: {
+    total_actions: number;
+    running: number;
+    completed: number;
+    partial: number;
+    retrying: number;
+    failed: number;
+  };
+  actions: DurableAction[];
+  events: SSEEvent[];
+  recovery: {
+    durable_results: boolean;
+    event_replay: boolean;
+    operator_resume_required: boolean;
+  };
+}
+
+export interface ControlEvidenceControl {
+  control_id: string;
+  title: string;
+  family: string;
+  status: 'evidenced' | 'not_evidenced';
+  evidence_refs: string[];
+  limitation: string;
+  scope: string[];
+}
+
+export interface ControlEvidence {
+  scan_id: string;
+  catalog: string;
+  catalog_version: string;
+  claim: 'coverage_evidence_only';
+  summary: {
+    total: number;
+    evidenced: number;
+    not_evidenced: number;
+    coverage_percent: number;
+  };
+  controls: ControlEvidenceControl[];
+  disclaimer: string;
+}
+
 export interface APIKeyStatus {
   groups: Record<string, Array<{
     name: string;
@@ -131,9 +200,10 @@ export interface NVDStats {
 }
 
 export interface SSEEvent {
-  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'agent_status' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
+  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'agent_status' | 'agent_decision' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
   scan_id: string;
   timestamp: string;
+  sequence?: number;
   [key: string]: any;
 }
 
@@ -269,6 +339,25 @@ export interface AppSecCoverageLane {
   scanner_errors?: number;
   duration_seconds?: number;
   limitation?: string;
+  sbom?: {
+    status: string;
+    components?: number;
+    format?: string;
+    sha256?: string;
+    size?: number;
+    limitation?: string;
+  };
+}
+
+export interface AppSecArtifact {
+  id: number;
+  assessment_id: string;
+  kind: string;
+  format: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  created_at: string;
 }
 
 export interface AppSecFinding {
@@ -311,8 +400,18 @@ export interface AppSecAssessment {
     severities?: Partial<Record<SeverityKey, number>>;
     categories?: Record<string, number>;
     unavailable?: string[];
+    baseline_assessment_id?: string;
+    diff?: {
+      new: number;
+      unchanged: number;
+      resolved: number;
+      has_baseline: boolean;
+      new_fingerprints?: string[];
+      resolved_fingerprints?: string[];
+    };
   };
   error?: string;
+  artifacts?: AppSecArtifact[];
   created_at: string;
   updated_at: string;
   findings?: AppSecFinding[];

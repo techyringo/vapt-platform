@@ -191,6 +191,41 @@ class PersistenceStore:
                     FOREIGN KEY(scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS durable_actions (
+                    action_id TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL DEFAULT '',
+                    phase TEXT NOT NULL DEFAULT '',
+                    capability TEXT NOT NULL DEFAULT '',
+                    tool TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    attempt INTEGER NOT NULL DEFAULT 1,
+                    max_attempts INTEGER NOT NULL DEFAULT 2,
+                    idempotency_key TEXT NOT NULL,
+                    input_hash TEXT NOT NULL DEFAULT '',
+                    reason TEXT NOT NULL DEFAULT '',
+                    runner TEXT NOT NULL DEFAULT 'arq',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    checkpoint_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    queued_at TEXT NOT NULL,
+                    started_at TEXT,
+                    heartbeat_at TEXT,
+                    completed_at TEXT,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(idempotency_key)
+                );
+
+                CREATE TABLE IF NOT EXISTS oob_tokens (
+                    token TEXT PRIMARY KEY,
+                    scan_id TEXT NOT NULL DEFAULT '',
+                    hypothesis_id TEXT NOT NULL DEFAULT '',
+                    interaction_type TEXT NOT NULL DEFAULT 'http',
+                    expires_at TEXT NOT NULL,
+                    interacted_at TEXT,
+                    interaction_json TEXT NOT NULL DEFAULT '{}',
+                    created_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS assets (
                     scan_id TEXT NOT NULL,
                     asset_key TEXT NOT NULL,
@@ -278,15 +313,33 @@ class PersistenceStore:
                     FOREIGN KEY(assessment_id) REFERENCES appsec_assessments(assessment_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS appsec_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assessment_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(assessment_id) REFERENCES appsec_assessments(assessment_id) ON DELETE CASCADE,
+                    UNIQUE(assessment_id, kind, format)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
                 CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id, id);
                 CREATE INDEX IF NOT EXISTS idx_tool_runs_scan ON tool_runs(scan_id, id);
+                CREATE INDEX IF NOT EXISTS idx_durable_actions_scan ON durable_actions(scan_id, queued_at);
+                CREATE INDEX IF NOT EXISTS idx_durable_actions_status ON durable_actions(status, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_oob_tokens_scan ON oob_tokens(scan_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_scans_updated ON scans(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_assets_scan_type ON assets(scan_id, asset_type);
                 CREATE INDEX IF NOT EXISTS idx_asset_edges_scan_source ON asset_edges(scan_id, source_key);
                 CREATE INDEX IF NOT EXISTS idx_appsec_assessments_updated ON appsec_assessments(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_appsec_findings_assessment ON appsec_findings(assessment_id, severity);
                 CREATE INDEX IF NOT EXISTS idx_appsec_runs_assessment ON appsec_tool_runs(assessment_id, id);
+                CREATE INDEX IF NOT EXISTS idx_appsec_artifacts_assessment ON appsec_artifacts(assessment_id, kind);
                 """
             )
             self._ensure_column(conn, "tool_runs", "command_preview", "TEXT NOT NULL DEFAULT ''")
@@ -313,7 +366,17 @@ class PersistenceStore:
 
     @staticmethod
     def _finding_key(finding: dict[str, Any]) -> str:
-        return f"{finding.get('title', '').lower().strip()}|{finding.get('target_host', '').lower().strip()}"
+        host = str(finding.get("target_host") or "").lower().strip()
+        cves = sorted({str(value).upper() for value in (finding.get("cve_ids") or []) if str(value).strip()})
+        if cves:
+            return f"{host}|cve|{','.join(cves)}"
+        title = re.sub(
+            r"^(cms vulnerability|potential vulnerability|vulnerability)\s*:\s*",
+            "",
+            str(finding.get("title") or "").lower().strip(),
+        )
+        title = re.sub(r"\s+", " ", title)
+        return f"{host}|title|{title}"
 
     @staticmethod
     def _safe_name(value: str, fallback: str = "artifact") -> str:
@@ -352,7 +415,10 @@ class PersistenceStore:
     def upsert_scan(self, scan_id: str, data: dict[str, Any]) -> None:
         now = _utc_now()
         metadata = dict(data.get("scan_metadata") or {})
-        for key in ("target_classifications", "seed_evidence", "coverage"):
+        for key in (
+            "target_classifications", "seed_evidence", "coverage", "scope",
+            "rules_of_engagement", "execution_targets", "display_targets",
+        ):
             if key in data:
                 metadata[key] = data.get(key)
         with self._lock, self._connect() as conn:
@@ -431,6 +497,8 @@ class PersistenceStore:
                 return False
             conn.execute("DELETE FROM events WHERE scan_id = ?", (scan_id,))
             conn.execute("DELETE FROM tool_runs WHERE scan_id = ?", (scan_id,))
+            conn.execute("DELETE FROM durable_actions WHERE scan_id = ?", (scan_id,))
+            conn.execute("DELETE FROM oob_tokens WHERE scan_id = ?", (scan_id,))
             conn.execute("DELETE FROM asset_edges WHERE scan_id = ?", (scan_id,))
             conn.execute("DELETE FROM assets WHERE scan_id = ?", (scan_id,))
             conn.execute("DELETE FROM agent_statuses WHERE scan_id = ?", (scan_id,))
@@ -477,7 +545,10 @@ class PersistenceStore:
         metadata = _json_load(row["scan_metadata_json"], {})
         if isinstance(metadata, dict):
             data["scan_metadata"] = metadata
-            for key in ("target_classifications", "seed_evidence", "coverage"):
+            for key in (
+                "target_classifications", "seed_evidence", "coverage", "scope",
+                "rules_of_engagement", "execution_targets", "display_targets",
+            ):
                 if key in metadata:
                     data[key] = metadata.get(key)
         return data
@@ -672,9 +743,9 @@ class PersistenceStore:
             }
         return statuses
 
-    def append_event(self, payload: dict[str, Any]) -> None:
+    def append_event(self, payload: dict[str, Any]) -> int:
         with self._lock, self._connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO events (scan_id, event_type, timestamp, payload_json)
                 VALUES (?, ?, ?, ?)
@@ -686,10 +757,18 @@ class PersistenceStore:
                     _json_dump(payload),
                 ),
             )
+            sequence = int(cursor.lastrowid)
+            stored_payload = dict(payload)
+            stored_payload["sequence"] = sequence
+            conn.execute(
+                "UPDATE events SET payload_json = ? WHERE id = ?",
+                (_json_dump(stored_payload), sequence),
+            )
+            return sequence
 
-    async def append_event_async(self, payload: dict[str, Any]) -> None:
+    async def append_event_async(self, payload: dict[str, Any]) -> int:
         """Non-blocking variant of append_event."""
-        await self._run_sync(self.append_event, payload)
+        return await self._run_sync(self.append_event, payload)
 
     def append_tool_run(self, scan_id: str, agent_type: str, run: dict[str, Any]) -> None:
         now = _utc_now()
@@ -794,6 +873,165 @@ class PersistenceStore:
                 (limit,),
             ).fetchall()
         return [_json_load(row["payload_json"], {}) for row in reversed(rows)]
+
+    def load_events_after(self, sequence: int, limit: int = 500) -> list[dict[str, Any]]:
+        """Replay persisted events after a client's last acknowledged sequence."""
+        limit = max(1, min(limit, 2000))
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, payload_json FROM events WHERE id > ? ORDER BY id ASC LIMIT ?",
+                (max(0, int(sequence or 0)), limit),
+            ).fetchall()
+        events: list[dict[str, Any]] = []
+        for row in rows:
+            payload = _json_load(row["payload_json"], {})
+            if isinstance(payload, dict):
+                payload.setdefault("sequence", row["id"])
+                events.append(payload)
+        return events
+
+    # ── Durable capability actions ─────────────────────────────────
+
+    def create_durable_action(self, action: dict[str, Any]) -> dict[str, Any]:
+        """Persist an idempotent capability action before it enters the queue."""
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO durable_actions (
+                    action_id, scan_id, phase, capability, tool, status, attempt,
+                    max_attempts, idempotency_key, input_hash, reason, runner,
+                    result_json, checkpoint_json, error, queued_at, started_at,
+                    heartbeat_at, completed_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(idempotency_key) DO NOTHING
+                """,
+                (
+                    action["action_id"], action.get("scan_id", ""), action.get("phase", ""),
+                    action.get("capability", action.get("tool", "")), action.get("tool", ""),
+                    action.get("status", "queued"), int(action.get("attempt", 1) or 1),
+                    int(action.get("max_attempts", 2) or 2), action["idempotency_key"],
+                    action.get("input_hash", ""), action.get("reason", ""),
+                    action.get("runner", "arq"), _json_dump(action.get("result", {})),
+                    _json_dump(action.get("checkpoint", {})), action.get("error", ""),
+                    action.get("queued_at", now), action.get("started_at"),
+                    action.get("heartbeat_at"), action.get("completed_at"), now,
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM durable_actions WHERE idempotency_key = ?",
+                (action["idempotency_key"],),
+            ).fetchone()
+        return self._durable_action_from_row(row)
+
+    def update_durable_action(self, action_id: str, updates: dict[str, Any]) -> None:
+        allowed = {
+            "status", "attempt", "result", "checkpoint", "error", "started_at",
+            "heartbeat_at", "completed_at", "reason", "runner", "phase", "capability",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        json_fields = {"result": "result_json", "checkpoint": "checkpoint_json"}
+        for key, value in updates.items():
+            if key not in allowed:
+                continue
+            column = json_fields.get(key, key)
+            assignments.append(f"{column} = ?")
+            values.append(_json_dump(value) if key in json_fields else value)
+        if not assignments:
+            return
+        assignments.append("updated_at = ?")
+        values.extend([_utc_now(), action_id])
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"UPDATE durable_actions SET {', '.join(assignments)} WHERE action_id = ?",
+                values,
+            )
+
+    async def update_durable_action_async(self, action_id: str, updates: dict[str, Any]) -> None:
+        await self._run_sync(self.update_durable_action, action_id, updates)
+
+    def load_durable_action(self, action_id: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM durable_actions WHERE action_id = ?", (action_id,),
+            ).fetchone()
+        return self._durable_action_from_row(row) if row else None
+
+    def load_durable_actions(self, scan_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM durable_actions WHERE scan_id = ? ORDER BY queued_at, action_id",
+                (scan_id,),
+            ).fetchall()
+        return [self._durable_action_from_row(row) for row in rows]
+
+    def register_oob_token(self, token: str, data: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO oob_tokens (
+                    token, scan_id, hypothesis_id, interaction_type, expires_at,
+                    interaction_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, '{}', ?)
+                """,
+                (
+                    token, data.get("scan_id", ""), data.get("hypothesis_id", ""),
+                    data.get("interaction_type", "http"), data["expires_at"], _utc_now(),
+                ),
+            )
+
+    def record_oob_interaction(self, token: str, interaction: dict[str, Any]) -> bool:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE oob_tokens SET interacted_at = ?, interaction_json = ?
+                WHERE token = ? AND expires_at >= ?
+                """,
+                (now, _json_dump(interaction), token, now),
+            )
+            return bool(cursor.rowcount)
+
+    def load_oob_token(self, token: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute("SELECT * FROM oob_tokens WHERE token = ?", (token,)).fetchone()
+        if not row:
+            return None
+        item = dict(row)
+        item["interaction"] = _json_load(item.pop("interaction_json"), {})
+        return item
+
+    def recover_stale_actions(self, stale_before: str) -> int:
+        """Move abandoned queued/running actions to a visible retry state."""
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE durable_actions
+                SET status = 'retrying', error = CASE WHEN error = ''
+                    THEN 'Runner heartbeat expired; safe retry is available.' ELSE error END,
+                    updated_at = ?
+                WHERE status IN ('queued', 'running') AND updated_at < ?
+                """,
+                (now, stale_before),
+            )
+            return int(cursor.rowcount or 0)
+
+    @staticmethod
+    def _durable_action_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "action_id": row["action_id"], "scan_id": row["scan_id"],
+            "phase": row["phase"], "capability": row["capability"], "tool": row["tool"],
+            "status": row["status"], "attempt": row["attempt"],
+            "max_attempts": row["max_attempts"], "idempotency_key": row["idempotency_key"],
+            "input_hash": row["input_hash"], "reason": row["reason"], "runner": row["runner"],
+            "result": _json_load(row["result_json"], {}),
+            "checkpoint": _json_load(row["checkpoint_json"], {}), "error": row["error"],
+            "queued_at": row["queued_at"], "started_at": row["started_at"],
+            "heartbeat_at": row["heartbeat_at"], "completed_at": row["completed_at"],
+            "updated_at": row["updated_at"],
+        }
 
     def load_events(
         self,
@@ -1034,6 +1272,7 @@ class PersistenceStore:
         item = self._appsec_assessment_from_row(row)
         item["findings"] = self.load_appsec_findings(assessment_id)
         item["tool_runs"] = self.load_appsec_runs(assessment_id)
+        item["artifacts"] = self.load_appsec_artifacts(assessment_id)
         return item
 
     def load_appsec_assessments(self) -> list[dict[str, Any]]:
@@ -1042,6 +1281,29 @@ class PersistenceStore:
                 "SELECT * FROM appsec_assessments ORDER BY updated_at DESC",
             ).fetchall()
         return [self._appsec_assessment_from_row(row) for row in rows]
+
+    def load_previous_appsec_assessment(
+        self,
+        repository: str,
+        *,
+        exclude_id: str,
+    ) -> Optional[dict[str, Any]]:
+        """Return the newest comparable assessment for baseline/diff analysis."""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM appsec_assessments
+                WHERE repository = ? AND assessment_id != ?
+                    AND status IN ('completed', 'partial')
+                ORDER BY updated_at DESC LIMIT 1
+                """,
+                (repository, exclude_id),
+            ).fetchone()
+        if not row:
+            return None
+        item = self._appsec_assessment_from_row(row)
+        item["findings"] = self.load_appsec_findings(item["assessment_id"])
+        return item
 
     def load_appsec_findings(self, assessment_id: str) -> list[dict[str, Any]]:
         with self._lock, self._connect() as conn:
@@ -1058,6 +1320,59 @@ class PersistenceStore:
                 (assessment_id,),
             ).fetchall()
         return [dict(row) | {"success": bool(row["success"]), "timed_out": bool(row["timed_out"])} for row in rows]
+
+    def save_appsec_artifact(
+        self,
+        assessment_id: str,
+        *,
+        kind: str,
+        format: str,
+        filename: str,
+        content: str,
+    ) -> dict[str, Any]:
+        safe_kind = self._safe_name(kind, "artifact")
+        safe_format = self._safe_name(format, "json")
+        safe_filename = self._safe_name(filename, f"{safe_kind}.{safe_format}")
+        data = content.encode("utf-8", errors="replace")
+        out_dir = self.artifact_root / "appsec" / self._safe_name(assessment_id, "assessment")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / safe_filename
+        path.write_bytes(data)
+        digest = hashlib.sha256(data).hexdigest()
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO appsec_artifacts (
+                    assessment_id, kind, format, filename, path, sha256, size, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(assessment_id, kind, format) DO UPDATE SET
+                    filename=excluded.filename, path=excluded.path, sha256=excluded.sha256,
+                    size=excluded.size, created_at=excluded.created_at
+                """,
+                (assessment_id, safe_kind, safe_format, safe_filename, str(path), digest, len(data), now),
+            )
+        return {
+            "assessment_id": assessment_id, "kind": safe_kind, "format": safe_format,
+            "filename": safe_filename, "path": str(path), "sha256": digest,
+            "size": len(data), "created_at": now,
+        }
+
+    def load_appsec_artifacts(self, assessment_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM appsec_artifacts WHERE assessment_id = ? ORDER BY kind, format",
+                (assessment_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_appsec_artifact(self, assessment_id: str, kind: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM appsec_artifacts WHERE assessment_id = ? AND kind = ? ORDER BY id DESC LIMIT 1",
+                (assessment_id, self._safe_name(kind, "artifact")),
+            ).fetchone()
+        return dict(row) if row else None
 
     @staticmethod
     def _appsec_assessment_from_row(row: sqlite3.Row) -> dict[str, Any]:

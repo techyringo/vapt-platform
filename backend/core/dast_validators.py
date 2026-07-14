@@ -9,12 +9,15 @@ from __future__ import annotations
 import asyncio
 import base64
 import json
+import os
 import re
 import statistics
 import time
 from dataclasses import asdict, dataclass, field
+from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urljoin, urlparse
+from uuid import uuid4
 
 import httpx
 
@@ -67,9 +70,18 @@ class DASTValidator:
         "$where",
     )
 
-    def __init__(self, *, scope: Any = None, timeout: float = 12.0) -> None:
+    def __init__(
+        self,
+        *,
+        scope: Any = None,
+        timeout: float = 12.0,
+        oob_store: Any = None,
+        oob_base_url: str = "",
+    ) -> None:
         self.scope = scope
         self.timeout = timeout
+        self.oob_store = oob_store
+        self.oob_base_url = (oob_base_url or os.environ.get("VAPT_OOB_BASE_URL", "")).rstrip("/")
 
     async def validate_many(
         self,
@@ -98,6 +110,8 @@ class DASTValidator:
         validator = hypothesis.validator
         if validator == "open_redirect":
             return await self._validate_open_redirect(hypothesis)
+        if validator == "ssrf_http_oob":
+            return await self._validate_ssrf_oob(hypothesis)
         if validator == "xss_reflection":
             return await self._validate_xss_reflection(hypothesis)
         if validator == "ssti_arithmetic":
@@ -115,6 +129,75 @@ class DASTValidator:
         if validator == "jwt_alg_none":
             return await self._validate_jwt_alg_none(hypothesis)
         return None
+
+    async def _validate_ssrf_oob(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
+        """Confirm server-side HTTP fetches using a single-use callback token."""
+        if self.oob_store is None or not self.oob_base_url.startswith(("http://", "https://")):
+            return None
+        token = uuid4().hex
+        try:
+            from core.job_tracker import current_scan_id
+
+            scan_id = current_scan_id.get()
+        except Exception:
+            scan_id = ""
+        self.oob_store.register_oob_token(token, {
+            "scan_id": scan_id,
+            "hypothesis_id": hypothesis.id,
+            "interaction_type": "http",
+            "expires_at": (datetime.utcnow() + timedelta(minutes=10)).isoformat(),
+        })
+        callback = f"{self.oob_base_url}/api/oob/c/{token}"
+        test_url = DASTPlanner.replace_param(
+            hypothesis.candidate.url,
+            hypothesis.candidate.parameter,
+            callback,
+        )
+        async with self._client(follow_redirects=True) as client:
+            try:
+                await client.get(test_url)
+            except httpx.HTTPError:
+                # The target may close its client response after dispatching a
+                # background fetch. The callback remains the source of truth.
+                pass
+        interaction: dict[str, Any] = {}
+        for _ in range(16):
+            record = await asyncio.to_thread(self.oob_store.load_oob_token, token)
+            if record and record.get("interacted_at"):
+                interaction = record
+                break
+            await asyncio.sleep(0.5)
+        if not interaction:
+            return None
+        observed = interaction.get("interaction") or {}
+        return ValidationProof(
+            hypothesis_id=hypothesis.id,
+            vuln_type="ssrf",
+            validator=hypothesis.validator,
+            url=test_url,
+            parameter=hypothesis.candidate.parameter,
+            confirmed=True,
+            confidence="high",
+            severity="high",
+            title="Server-Side Request Forgery With OOB HTTP Proof",
+            evidence=(
+                f"The target triggered the single-use HTTP callback token at "
+                f"{interaction.get('interacted_at')}; source fingerprint "
+                f"{observed.get('source_sha256', 'recorded')}."
+            ),
+            request_proof=f"GET {test_url}",
+            response_proof=(
+                f"OOB callback observed: method={observed.get('method', 'unknown')} "
+                f"token={token[:8]}… timestamp={interaction.get('interacted_at')}"
+            ),
+            remediation=(
+                "Allowlist outbound destinations, reject private/link-local addresses after DNS resolution, "
+                "disable unnecessary redirects, and route required fetches through a constrained egress proxy."
+            ),
+            cwe_ids=["CWE-918"],
+            tags=["dast-proof", "ssrf", "oob-http", "safe-validation"],
+            metadata={"callback_token_prefix": token[:8], "interaction": observed},
+        )
 
     async def _validate_open_redirect(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
         payload = "https://example.invalid/vapt-open-redirect-proof"

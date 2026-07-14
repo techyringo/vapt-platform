@@ -101,6 +101,9 @@ class VulnScannerAgent(BaseAgent):
         evidence_tokens: frozenset[str] = frozenset(
             task.parameters.get("evidence_tokens") or set()
         )
+        policy_bound = "approved_capabilities" in task.parameters
+        approved_capabilities = set(task.parameters.get("approved_capabilities") or ())
+        allowed = lambda name: not policy_bound or name in approved_capabilities
 
         # Run scanners
         all_nuclei_findings = []
@@ -108,26 +111,31 @@ class VulnScannerAgent(BaseAgent):
         cms_findings = []
         tech_nuclei_findings: list[dict] = []
 
-        if self.config.tools.get("nuclei", AppConfig().get_tool_config("nuclei")).enabled:
+        if allowed("nuclei") and self.config.tools.get("nuclei", AppConfig().get_tool_config("nuclei")).enabled:
             all_nuclei_findings = await self._run_nuclei(targets)
 
         web_roots = self._preferred_web_roots(self._web_roots(targets))
 
         await self._augment_cms_detection_from_targets(web_roots, technologies)
 
-        if self.config.tools.get("nikto", AppConfig().get_tool_config("nikto")).enabled:
+        if allowed("nikto") and self.config.tools.get("nikto", AppConfig().get_tool_config("nikto")).enabled:
             nikto_findings = await self._run_nikto(web_roots[:5])
             nikto_findings = await self._validate_nikto_findings(nikto_findings)
             self._augment_cms_detection_from_nikto(nikto_findings, technologies)
 
-        cms_findings = await self._run_cms_scanners(web_roots, technologies)
+        cms_findings = await self._run_cms_scanners(
+            web_roots,
+            technologies,
+            approved_capabilities=approved_capabilities if policy_bound else None,
+        )
 
         # Evidence-driven pass: fire targeted nuclei for every detected tech /
         # service that has a matching entry in TECH_NUCLEI_TAGS and that was NOT
         # already handled by the dedicated CMS scanners above.
-        tech_nuclei_findings = await self._run_tech_specific_nuclei(
-            targets, evidence_tokens, technologies
-        )
+        if allowed("nuclei"):
+            tech_nuclei_findings = await self._run_tech_specific_nuclei(
+                targets, evidence_tokens, technologies
+            )
 
         # Convert all findings to Finding objects
         self._convert_nuclei_findings(all_nuclei_findings, task.target)
@@ -792,7 +800,13 @@ class VulnScannerAgent(BaseAgent):
             ),
         }
 
-    async def _run_cms_scanners(self, targets: list[str], technologies: dict[str, list[str]]) -> list[dict]:
+    async def _run_cms_scanners(
+        self,
+        targets: list[str],
+        technologies: dict[str, list[str]],
+        *,
+        approved_capabilities: set[str] | None = None,
+    ) -> list[dict]:
         """Run CMS-specific vulnerability scanners based on detected technology."""
         cms_findings = []
 
@@ -821,7 +835,9 @@ class VulnScannerAgent(BaseAgent):
                     url=url,
                 )
 
-        if wp_hosts and self.config.tools.get("wpscan", AppConfig().get_tool_config("wpscan")).enabled:
+        wpscan_allowed = approved_capabilities is None or "wpscan" in approved_capabilities
+        nuclei_allowed = approved_capabilities is None or "nuclei" in approved_capabilities
+        if wp_hosts and wpscan_allowed and self.config.tools.get("wpscan", AppConfig().get_tool_config("wpscan")).enabled:
             from utils.env import first_env_value
             wpscan_token = first_env_value("WPSCAN_API_TOKEN")
             if not wpscan_token:
@@ -908,7 +924,8 @@ class VulnScannerAgent(BaseAgent):
         for family, family_targets in cms_targets.items():
             if not family_targets:
                 continue
-            cms_findings.extend(await self._run_cms_nuclei(family, sorted(family_targets)))
+            if nuclei_allowed:
+                cms_findings.extend(await self._run_cms_nuclei(family, sorted(family_targets)))
 
         return cms_findings
 
@@ -1345,9 +1362,14 @@ class VulnScannerAgent(BaseAgent):
                 references=references,
                 cve_ids=cve_ids,
                 cwe_ids=cwe_ids,
-                tags=["cms", component, cms.get("source_tool", "cms-scanner"), "vulnerability"],
-                confidence="high" if cve_ids else "medium",
-                status="confirmed" if cve_ids else "suspected",
+                tags=[
+                    "cms", component, cms.get("source_tool", "cms-scanner"),
+                    "vulnerability", "version-applicability-candidate",
+                ],
+                confidence="medium",
+                # A scanner/CVE match is a valuable applicability lead, not
+                # behavioural proof that the deployed target is exploitable.
+                status="suspected",
                 raw_tool_output=json.dumps(cms, default=str),
             )
             self._add_finding(finding)

@@ -54,7 +54,8 @@ class DASTPlanner:
     NOSQLI_PARAMS = {"id", "user", "username", "email", "filter", "where", "query", "q"}
     XSS_PARAMS = {"q", "s", "search", "query", "keyword", "name", "message", "comment", "callback", "return"}
     SSTI_PARAMS = {"name", "template", "tpl", "view", "preview", "message", "content", "email", "subject"}
-    CMD_PARAMS = {"host", "ip", "domain", "cmd", "command", "exec", "ping", "lookup", "dns", "url", "target"}
+    CMD_PARAMS = {"host", "ip", "domain", "cmd", "command", "exec", "ping", "lookup", "dns"}
+    SSRF_PARAMS = {"url", "uri", "endpoint", "callback", "webhook", "feed", "image", "avatar", "proxy", "dest", "destination"}
     LFI_PARAMS = {"file", "path", "page", "template", "include", "download", "doc", "document", "view"}
     REDIRECT_PARAMS = {"next", "redirect", "redirect_uri", "return", "returnurl", "url", "continue", "destination"}
 
@@ -200,6 +201,8 @@ class DASTPlanner:
 
             if name in self.REDIRECT_PARAMS:
                 specs.append(("open_redirect", "open_redirect", 10, "Parameter commonly controls redirects."))
+            if name in self.SSRF_PARAMS:
+                specs.append(("ssrf", "ssrf_http_oob", 12, "Parameter may cause the server to fetch an external resource."))
             if name in self.CMD_PARAMS:
                 specs.append(("command_injection", "command_injection_timing", 15, "Parameter name suggests OS/network command sink."))
             if name in self.SSTI_PARAMS:

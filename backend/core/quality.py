@@ -105,7 +105,11 @@ def assess_finding_quality(finding: dict[str, Any]) -> dict[str, Any]:
     if cwes:
         score += 4
     if nvd_verified:
-        score += 18
+        # NVD verifies identifier/catalogue metadata, not deployment
+        # applicability. Keep the enrichment useful without allowing it to
+        # substitute for response, code-flow, provider, or differential proof.
+        score += 5
+        notes.append("CVE metadata exists in NVD; target applicability still requires validation.")
     if tags.intersection(TOOL_EVIDENCE_TAGS):
         score += 12
 
@@ -114,9 +118,9 @@ def assess_finding_quality(finding: dict[str, Any]) -> dict[str, Any]:
         score -= 18
         notes.append("AI-only finding; requires independent tool or manual validation.")
 
-    if severity in {"critical", "high"} and not (request or response or cves or nvd_verified):
+    if severity in {"critical", "high"} and not (request or response):
         score -= 8
-        notes.append("High-impact severity lacks replay proof, CVE, or NVD validation.")
+        notes.append("High-impact severity lacks replayable request/response or equivalent proof.")
 
     if len(description) < 40:
         score -= 4

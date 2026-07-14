@@ -1,9 +1,9 @@
 'use client';
 
 import type React from 'react';
-import { Code2, GitBranch, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
+import { ClipboardCheck, Code2, GitBranch, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
 
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'tools' | 'config';
+type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
 
 interface SidebarItemProps {
   active: boolean;
@@ -67,6 +67,7 @@ export function Sidebar({
         <SidebarItem active={activeTab === 'appsec'}    icon={Code2}          label="Code Security"                 onClick={() => onTabChange('appsec')} />
         <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings" count={findingCount}  onClick={() => onTabChange('findings')} />
         <SidebarItem active={activeTab === 'agents'}    icon={GitBranch}       label="Attack Paths" count={attackPathCount} onClick={() => onTabChange('agents')} />
+        <SidebarItem active={activeTab === 'govern'}    icon={ClipboardCheck}  label="Control Evidence"              onClick={() => onTabChange('govern')} />
         <div className="sidebar-section-label">Administration</div>
         <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Operations"                    onClick={() => onTabChange('tools')} />
         <SidebarItem active={activeTab === 'config'}    icon={Settings}        label="Settings"                        onClick={() => onTabChange('config')} />
