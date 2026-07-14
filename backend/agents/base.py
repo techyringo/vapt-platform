@@ -94,7 +94,15 @@ class BaseAgent(ABC):
         if phase:
             data["phase"] = phase
         self._tool_runs.append(data)
-        if data.get("success") is False:
+        if data.get("partial"):
+            logger.warning(
+                "[{agent}] Tool returned partial evidence: {tool} phase={phase} exit={exit_code}",
+                agent=self.agent_type.value,
+                tool=data.get("tool", "unknown"),
+                phase=phase or data.get("phase", ""),
+                exit_code=data.get("exit_code"),
+            )
+        elif data.get("success") is False:
             err_text = str(data.get("stderr", "") or data.get("stdout", ""))[:500]
             logger.warning(
                 "[{agent}] Tool failed: {tool} phase={phase} exit={exit_code} output={output}",

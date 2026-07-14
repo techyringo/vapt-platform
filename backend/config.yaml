@@ -107,9 +107,9 @@ profiles:
 
 # ─── Rate Limiting ───
 rate_limiting:
-  requests_per_second: 50
-  concurrent_threads: 10
-  delay_between_requests: 0.1
+  requests_per_second: 5
+  concurrent_threads: 4
+  delay_between_requests: 0.2
   respect_robots_txt: false
   waf_detection: true
   waf_evasion: true
@@ -127,7 +127,7 @@ tools:
   amass:
     enabled: true
     docker_image: "caffix/amass:latest"
-    timeout: 600
+    timeout: 330
     extra_args: []
 
   assetfinder:
@@ -285,6 +285,22 @@ tools:
     docker_image: "zricethezav/gitleaks:latest"
     timeout: 600
 
+  # Application security vertical slice. These approved images are pulled on
+  # first use and their exact runtime metadata is recorded with the assessment.
+  semgrep:
+    enabled: true
+    docker_image: "semgrep/semgrep:latest"
+    timeout: 900
+    memory_limit: "2048m"
+    cpu_limit: 2.0
+
+  trivy:
+    enabled: true
+    docker_image: "aquasec/trivy:latest"
+    timeout: 900
+    memory_limit: "1536m"
+    cpu_limit: 1.5
+
   # Misc
   waybackurls:
     enabled: true
@@ -325,7 +341,9 @@ tools:
     #   -timeout 10  per-request timeout
     memory_limit: "1536m"
     cpu_limit: 1.5
-    extra_args: ["-jc", "-aff", "-d", "3", "-c", "10", "-rl", "100", "-timeout", "10"]
+    # -ct is Katana's own crawl deadline. It lets Katana flush partial JSONL
+    # before the outer worker deadline instead of being killed with no result.
+    extra_args: ["-jc", "-aff", "-d", "3", "-c", "10", "-rl", "100", "-timeout", "10", "-ct", "240s"]
 
   hakrawler:
     enabled: true

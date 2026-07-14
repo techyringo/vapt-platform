@@ -218,12 +218,75 @@ class PersistenceStore:
                     FOREIGN KEY(scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS appsec_assessments (
+                    assessment_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    repository TEXT NOT NULL,
+                    ref TEXT NOT NULL DEFAULT 'main',
+                    commit_sha TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    phase TEXT NOT NULL DEFAULT 'queued',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    job_id TEXT NOT NULL DEFAULT '',
+                    coverage_json TEXT NOT NULL DEFAULT '{}',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS appsec_findings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assessment_id TEXT NOT NULL,
+                    fingerprint TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    category TEXT NOT NULL,
+                    rule_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    description TEXT NOT NULL DEFAULT '',
+                    severity TEXT NOT NULL DEFAULT 'medium',
+                    confidence TEXT NOT NULL DEFAULT 'medium',
+                    status TEXT NOT NULL DEFAULT 'candidate',
+                    repository TEXT NOT NULL,
+                    path TEXT NOT NULL DEFAULT '',
+                    start_line INTEGER,
+                    end_line INTEGER,
+                    package TEXT NOT NULL DEFAULT '',
+                    installed_version TEXT NOT NULL DEFAULT '',
+                    fixed_version TEXT NOT NULL DEFAULT '',
+                    cve_ids_json TEXT NOT NULL DEFAULT '[]',
+                    cwe_ids_json TEXT NOT NULL DEFAULT '[]',
+                    references_json TEXT NOT NULL DEFAULT '[]',
+                    evidence TEXT NOT NULL DEFAULT '',
+                    remediation TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(assessment_id) REFERENCES appsec_assessments(assessment_id) ON DELETE CASCADE,
+                    UNIQUE(assessment_id, fingerprint)
+                );
+
+                CREATE TABLE IF NOT EXISTS appsec_tool_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    assessment_id TEXT NOT NULL,
+                    lane TEXT NOT NULL,
+                    tool TEXT NOT NULL,
+                    success INTEGER NOT NULL DEFAULT 0,
+                    exit_code INTEGER NOT NULL DEFAULT -1,
+                    duration REAL NOT NULL DEFAULT 0,
+                    timed_out INTEGER NOT NULL DEFAULT 0,
+                    stderr_snippet TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(assessment_id) REFERENCES appsec_assessments(assessment_id) ON DELETE CASCADE
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
                 CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id, id);
                 CREATE INDEX IF NOT EXISTS idx_tool_runs_scan ON tool_runs(scan_id, id);
                 CREATE INDEX IF NOT EXISTS idx_scans_updated ON scans(updated_at);
                 CREATE INDEX IF NOT EXISTS idx_assets_scan_type ON assets(scan_id, asset_type);
                 CREATE INDEX IF NOT EXISTS idx_asset_edges_scan_source ON asset_edges(scan_id, source_key);
+                CREATE INDEX IF NOT EXISTS idx_appsec_assessments_updated ON appsec_assessments(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_appsec_findings_assessment ON appsec_findings(assessment_id, severity);
+                CREATE INDEX IF NOT EXISTS idx_appsec_runs_assessment ON appsec_tool_runs(assessment_id, id);
                 """
             )
             self._ensure_column(conn, "tool_runs", "command_preview", "TEXT NOT NULL DEFAULT ''")
@@ -694,13 +757,18 @@ class PersistenceStore:
 
     @staticmethod
     def _tool_run_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        success = bool(row["success"])
+        partial = not success and bool(row["timed_out"]) and int(row["stdout_size"] or 0) > 0
         return {
             "id": row["id"],
             "scan_id": row["scan_id"],
             "agent_type": row["agent_type"],
             "phase": row["phase"],
             "tool": row["tool"],
-            "success": bool(row["success"]),
+            "success": success,
+            "partial": partial,
+            "evidence_captured": success or partial,
+            "outcome": "completed" if success else "partial" if partial else "timed_out" if row["timed_out"] else "failed",
             "exit_code": row["exit_code"],
             "duration": row["duration"],
             "timed_out": bool(row["timed_out"]),
@@ -855,3 +923,158 @@ class PersistenceStore:
             "first_seen": row["first_seen"],
             "last_seen": row["last_seen"],
         }
+
+    # ── Unified AppSec assessments ─────────────────────────────────────
+
+    def create_appsec_assessment(self, assessment_id: str, data: dict[str, Any]) -> None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO appsec_assessments (
+                    assessment_id, name, repository, ref, status, phase,
+                    progress, coverage_json, summary_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment_id,
+                    data.get("name") or assessment_id,
+                    data.get("repository", ""),
+                    data.get("ref", "main"),
+                    data.get("status", "queued"),
+                    data.get("phase", "queued"),
+                    int(data.get("progress", 0) or 0),
+                    _json_dump(data.get("coverage", {})),
+                    _json_dump(data.get("summary", {})),
+                    now,
+                    now,
+                ),
+            )
+
+    def update_appsec_assessment(self, assessment_id: str, updates: dict[str, Any]) -> None:
+        allowed = {
+            "name": "name", "repository": "repository", "ref": "ref",
+            "commit_sha": "commit_sha", "status": "status", "phase": "phase",
+            "progress": "progress", "job_id": "job_id", "error": "error",
+            "coverage": "coverage_json", "summary": "summary_json",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, column in allowed.items():
+            if key not in updates:
+                continue
+            value = updates[key]
+            if key in {"coverage", "summary"}:
+                value = _json_dump(value if isinstance(value, dict) else {})
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at = ?")
+        values.extend([_utc_now(), assessment_id])
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"UPDATE appsec_assessments SET {', '.join(assignments)} WHERE assessment_id = ?",
+                values,
+            )
+
+    def replace_appsec_findings(self, assessment_id: str, findings: list[dict[str, Any]]) -> None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM appsec_findings WHERE assessment_id = ?", (assessment_id,))
+            for item in findings:
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO appsec_findings (
+                        assessment_id, fingerprint, source, category, rule_id,
+                        title, description, severity, confidence, status,
+                        repository, path, start_line, end_line, package,
+                        installed_version, fixed_version, cve_ids_json,
+                        cwe_ids_json, references_json, evidence, remediation, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        assessment_id, item["fingerprint"], item.get("source", ""),
+                        item.get("category", ""), item.get("rule_id", ""),
+                        item.get("title", ""), item.get("description", ""),
+                        item.get("severity", "medium"), item.get("confidence", "medium"),
+                        item.get("status", "candidate"), item.get("repository", ""),
+                        item.get("path", ""), item.get("start_line"), item.get("end_line"),
+                        item.get("package", ""), item.get("installed_version", ""),
+                        item.get("fixed_version", ""), _json_dump(item.get("cve_ids", [])),
+                        _json_dump(item.get("cwe_ids", [])), _json_dump(item.get("references", [])),
+                        item.get("evidence", ""), item.get("remediation", ""), now,
+                    ),
+                )
+
+    def append_appsec_run(self, assessment_id: str, lane: str, run: dict[str, Any]) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO appsec_tool_runs (
+                    assessment_id, lane, tool, success, exit_code, duration,
+                    timed_out, stderr_snippet, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    assessment_id, lane, run.get("tool", ""),
+                    1 if run.get("success") else 0, int(run.get("exit_code", -1) or 0),
+                    float(run.get("duration", 0) or 0), 1 if run.get("timed_out") else 0,
+                    str(run.get("stderr", ""))[-2000:], _utc_now(),
+                ),
+            )
+
+    def load_appsec_assessment(self, assessment_id: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM appsec_assessments WHERE assessment_id = ?", (assessment_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = self._appsec_assessment_from_row(row)
+        item["findings"] = self.load_appsec_findings(assessment_id)
+        item["tool_runs"] = self.load_appsec_runs(assessment_id)
+        return item
+
+    def load_appsec_assessments(self) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM appsec_assessments ORDER BY updated_at DESC",
+            ).fetchall()
+        return [self._appsec_assessment_from_row(row) for row in rows]
+
+    def load_appsec_findings(self, assessment_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM appsec_findings WHERE assessment_id = ? ORDER BY id ASC",
+                (assessment_id,),
+            ).fetchall()
+        return [self._appsec_finding_from_row(row) for row in rows]
+
+    def load_appsec_runs(self, assessment_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM appsec_tool_runs WHERE assessment_id = ? ORDER BY id ASC",
+                (assessment_id,),
+            ).fetchall()
+        return [dict(row) | {"success": bool(row["success"]), "timed_out": bool(row["timed_out"])} for row in rows]
+
+    @staticmethod
+    def _appsec_assessment_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        return {
+            "assessment_id": row["assessment_id"], "name": row["name"],
+            "repository": row["repository"], "ref": row["ref"],
+            "commit_sha": row["commit_sha"], "status": row["status"],
+            "phase": row["phase"], "progress": row["progress"],
+            "job_id": row["job_id"], "coverage": _json_load(row["coverage_json"], {}),
+            "summary": _json_load(row["summary_json"], {}), "error": row["error"],
+            "created_at": row["created_at"], "updated_at": row["updated_at"],
+        }
+
+    @staticmethod
+    def _appsec_finding_from_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["cve_ids"] = _json_load(item.pop("cve_ids_json"), [])
+        item["cwe_ids"] = _json_load(item.pop("cwe_ids_json"), [])
+        item["references"] = _json_load(item.pop("references_json"), [])
+        return item

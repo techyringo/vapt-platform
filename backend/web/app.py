@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any, Optional
 from datetime import datetime
 from urllib.parse import urlparse, urlunparse
+from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse
@@ -72,6 +73,13 @@ class ScanRequest(BaseModel):
 
 class ScanStopRequest(BaseModel):
     reason: str = "User cancelled"
+
+
+class AppSecAssessmentRequest(BaseModel):
+    """Start a repository assessment on an approved public Git host."""
+    repository: str
+    ref: str = "main"
+    name: str = ""
 
 
 class ApiImportRequest(BaseModel):
@@ -210,6 +218,15 @@ def get_config(app: FastAPI):
     return cfg
 
 
+def get_appsec_store(app: FastAPI):
+    store = getattr(app.state, "_appsec_store", None)
+    if store is None:
+        from database.store import PersistenceStore
+        store = PersistenceStore(get_config(app).database.url)
+        app.state._appsec_store = store
+    return store
+
+
 # ─── App Factory ──────────────────────────────────────────────────
 
 def create_app(config_path: Optional[str] = None) -> FastAPI:
@@ -247,6 +264,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
     # Lazy-loaded state slots
     app.state._manager = None
     app.state._config = None
+    app.state._appsec_store = None
     app.state._config_path = config_path
 
     # ── Startup: validate shared-dir + pre-pull images ────────────────
@@ -1068,6 +1086,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         if "/" in filename or "\\" in filename or filename in {"", ".", ".."}:
             raise HTTPException(status_code=400, detail="Invalid log filename")
         path = _log_dir() / filename
+        if path.is_symlink():
+            raise HTTPException(status_code=400, detail="Log links are not allowed")
         if not path.exists() or not path.is_file():
             raise HTTPException(status_code=404, detail="Log file not found")
         return path
@@ -1093,6 +1113,24 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             filename=path.name,
             media_type="application/octet-stream",
         )
+
+    @app.delete("/api/system/logs/{filename}")
+    async def delete_log_file(filename: str):
+        """Clear the active runtime log or remove a rotated log artifact."""
+        path = _safe_log_path(filename)
+        operation = "clear" if path.name == "vapt-runtime.log" else "delete"
+        try:
+            if path.name == "vapt-runtime.log":
+                # The Loguru sink holds this inode open with append semantics;
+                # truncating preserves the active sink while reclaiming space.
+                path.write_text("", encoding="utf-8")
+                action = "cleared"
+            else:
+                path.unlink()
+                action = "deleted"
+        except Exception as exc:
+            raise HTTPException(status_code=500, detail=f"Could not {operation} log: {exc}") from exc
+        return {"name": filename, "action": action}
 
     @app.post("/api/tools/select")
     async def select_tools_for_context(request: ToolSelectionRequest):
@@ -1241,6 +1279,71 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         mgr = get_manager(app)
         return {"modes": mgr.get_scan_modes()}
 
+    # ─── Unified application-security assessments ───────────────
+
+    @app.post("/api/appsec/assessments", status_code=202)
+    async def start_appsec_assessment(request: AppSecAssessmentRequest):
+        """Queue SAST, SCA/IaC, and secret scanning on an approved repository."""
+        from services.appsec_assessment import validate_ref, validate_repository_url
+        from tools.runner import ARQ_QUEUE_NAME, _get_arq_pool
+
+        try:
+            repository = validate_repository_url(request.repository)
+            ref = validate_ref(request.ref)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+        redis_url = os.environ.get("REDIS_URL", "").strip()
+        if not redis_url:
+            raise HTTPException(
+                status_code=503,
+                detail="Repository assessments require the durable ARQ worker queue (REDIS_URL).",
+            )
+
+        assessment_id = f"appsec_{uuid4().hex[:20]}"
+        store = get_appsec_store(app)
+        store.create_appsec_assessment(assessment_id, {
+            "name": request.name.strip() or repository.rsplit("/", 1)[-1].removesuffix(".git"),
+            "repository": repository,
+            "ref": ref,
+            "status": "queued",
+            "phase": "queued",
+            "progress": 0,
+            "coverage": {
+                "sast": {"status": "planned", "tool": "semgrep"},
+                "sca": {"status": "planned", "tool": "trivy"},
+                "secrets": {"status": "planned", "tool": "gitleaks"},
+            },
+        })
+        try:
+            pool = await _get_arq_pool(redis_url)
+            job = await pool.enqueue_job(
+                "run_appsec_assessment", assessment_id, repository, ref,
+                _queue_name=ARQ_QUEUE_NAME,
+                _job_id=f"appsec-job-{assessment_id}",
+                _expires=3600,
+            )
+            if job is None:
+                raise RuntimeError("Assessment job could not be queued")
+            store.update_appsec_assessment(assessment_id, {"job_id": job.job_id})
+        except Exception as exc:
+            store.update_appsec_assessment(assessment_id, {
+                "status": "failed", "phase": "queue_failed", "error": str(exc)[:1000],
+            })
+            raise HTTPException(status_code=503, detail=f"Assessment queue unavailable: {exc}") from exc
+        return {"assessment_id": assessment_id, "status": "queued"}
+
+    @app.get("/api/appsec/assessments")
+    async def list_appsec_assessments():
+        return {"assessments": get_appsec_store(app).load_appsec_assessments()}
+
+    @app.get("/api/appsec/assessments/{assessment_id}")
+    async def get_appsec_assessment(assessment_id: str):
+        assessment = get_appsec_store(app).load_appsec_assessment(assessment_id)
+        if not assessment:
+            raise HTTPException(status_code=404, detail="Application-security assessment not found")
+        return assessment
+
     # ─── Scan Management ────────────────────────────────────────
 
     @app.post("/api/scans/start")
@@ -1258,12 +1361,15 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             )
 
         mgr = get_manager(app)
-        result = await mgr.start_scan(
-            targets=request.targets,
-            mode=request.mode,
-            scan_name=request.name,
-            scope_config=request.scope_config,
-        )
+        try:
+            result = await mgr.start_scan(
+                targets=request.targets,
+                mode=request.mode,
+                scan_name=request.name,
+                scope_config=request.scope_config,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return result
 
     @app.post("/api/import/spec")

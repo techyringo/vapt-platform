@@ -27,7 +27,7 @@ configure_runtime_logging()
 
 from arq.connections import RedisSettings
 
-from worker.jobs import execute_tool, ping_worker, pull_tool_images
+from worker.jobs import execute_tool, ping_worker, pull_tool_images, run_appsec_assessment
 
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 ARQ_QUEUE_NAME = os.environ.get("VAPT_ARQ_QUEUE", "vapt:tools")
@@ -103,7 +103,7 @@ async def shutdown(ctx: dict) -> None:
 class WorkerSettings:
     """ARQ worker configuration."""
 
-    functions = [ping_worker, execute_tool, pull_tool_images]
+    functions = [ping_worker, execute_tool, pull_tool_images, run_appsec_assessment]
 
     redis_settings = _hardened_redis_settings()
 
@@ -119,8 +119,10 @@ class WorkerSettings:
     # would keep running past the report barrier (the premature-report bug).
     allow_abort_jobs = True
 
-    # How long to keep job results in Redis (seconds) for result() polling.
-    keep_result = 600   # 10 min
+    # Keep results longer than the largest normal queue wait + tool runtime.
+    # Otherwise a completed result can disappear before a delayed API waiter
+    # reads it, which looks exactly like a scanner timeout to the UI.
+    keep_result = max(900, int(os.environ.get("VAPT_ARQ_KEEP_RESULT", "1800")))
 
     on_startup = startup
     on_shutdown = shutdown

@@ -278,6 +278,23 @@ class ToolResult:
         return self.exit_code == 0 and not self.timed_out
 
     @property
+    def partial(self) -> bool:
+        """Whether a failed/expired process still produced usable evidence."""
+        return self.timed_out and bool(self.stdout.strip())
+
+    @property
+    def outcome(self) -> str:
+        if self.success:
+            return "completed"
+        if self.partial:
+            return "partial"
+        if self.timed_out:
+            return "timed_out"
+        if self.oom_killed:
+            return "resource_exhausted"
+        return "failed"
+
+    @property
     def output(self) -> str:
         return self.stdout
 
@@ -286,6 +303,9 @@ class ToolResult:
             "tool": self.tool_name,
             "exit_code": self.exit_code,
             "success": self.success,
+            "partial": self.partial,
+            "evidence_captured": self.success or self.partial,
+            "outcome": self.outcome,
             "duration": self.duration,
             "timed_out": self.timed_out,
             "command_preview": self.command_preview,
@@ -525,6 +545,12 @@ class DockerRunner:
             # Forward the live-log context so the worker can stream this tool's
             # output back to the API's SSE clients (cross-process).
             log_context = dict(tool_log_context.get() or {})
+            # Queue wait is not tool runtime. Under a busy two-worker scan a
+            # job can legitimately wait several minutes before its own
+            # execution timeout starts. Give ARQ a separate queue grace so
+            # the API does not abort a healthy long-running crawler merely
+            # because earlier tools occupied the workers.
+            queue_grace = max(60, int(os.environ.get("VAPT_ARQ_QUEUE_GRACE", "300")))
             job = await pool.enqueue_job(
                 "execute_tool",
                 tool_name,
@@ -535,7 +561,7 @@ class DockerRunner:
                 cwd,
                 log_context,
                 _queue_name=ARQ_QUEUE_NAME,
-                _expires=effective_timeout + 120,
+                _expires=effective_timeout + queue_grace,
             )
             if job is None:
                 logger.warning("[worker] Duplicate job for {tool} — running locally", tool=tool_name)
@@ -544,7 +570,10 @@ class DockerRunner:
             # Register the in-flight job so the orchestrator can drain/abort it
             # (prevents orphaned jobs from running past the report barrier).
             self._register_job(job)
-            result_data = await job.result(timeout=effective_timeout + 60, poll_delay=0.5)
+            result_data = await job.result(
+                timeout=effective_timeout + queue_grace,
+                poll_delay=0.5,
+            )
             self._unregister_job(job)
 
             if isinstance(result_data, dict):

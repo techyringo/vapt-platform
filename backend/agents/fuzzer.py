@@ -35,12 +35,14 @@ class FuzzingAgent(BaseAgent):
         super().__init__(AgentType.FUZZER, scope, config)
         self._runner = DockerRunner(config)
         self._llm_client = None
+        self._llm_hypotheses: list[dict[str, Any]] = []
 
     async def execute(self, task: AgentTask) -> list[Finding]:
         """Execute multi-strategy fuzzing."""
         logger.info("[FUZZER] Starting fuzzing")
         self.clear_findings()
         self.clear_tool_runs()
+        self._llm_hypotheses = []
 
         recon_data = task.parameters.get("recon_data", task.result or {})
         enum_data = task.parameters.get("enum_data", {})
@@ -93,6 +95,7 @@ class FuzzingAgent(BaseAgent):
         task.result = {
             "new_endpoints": all_new_endpoints,
             "total_new_endpoints": len(all_new_endpoints),
+            "llm_hypotheses": self._llm_hypotheses,
             "tool_runs": self.get_tool_runs(),
         }
 
@@ -319,29 +322,10 @@ class FuzzingAgent(BaseAgent):
                 )
                 self._add_finding(finding)
 
-        # Check for admin panels
-        admin_hits = [r for r in results if any(kw in r.get("url", "").lower() for kw in ["admin", "wp-admin", "phpmyadmin", "manager", "console", "dashboard"])]
-        if admin_hits:
-            for a in admin_hits[:5]:
-                url = a.get("url", "")
-                finding = Finding(
-                    title=f"Admin Panel Discovered: {url}",
-                    description=f"An administration interface was discovered at {url}. "
-                                f"Admin panels are high-value targets for brute-force attacks "
-                                f"and should be protected with strong authentication, MFA, "
-                                f"and IP-based access restrictions.",
-                    severity=Severity.MEDIUM,
-                    agent_source=AgentType.FUZZER,
-                    target=Target(host=target.host, url=url),
-                    evidence=f"HTTP {a.get('status', 'N/A')} — Length: {a.get('length', 'N/A')}",
-                    remediation="Protect admin interfaces with: IP whitelisting, MFA, rate limiting, "
-                                "account lockout policies, and CAPTCHA. Consider moving admin to a "
-                                "non-standard URL.",
-                    tags=["admin-panel", "brute-force", "authentication"],
-                    confidence="high",
-                    status="confirmed",
-                )
-                self._add_finding(finding)
+        # Administration routes are attack-surface inventory, not proof of a
+        # vulnerability. They remain in ``new_endpoints`` for targeted auth
+        # testing and the live surface view, but are never promoted merely
+        # because a path contains "admin" or "dashboard".
 
     async def _llm_analyze_fuzz_results(self, endpoints: list[dict], technologies: dict, target: Target) -> None:
         """Use LLM to analyze fuzzing results and identify patterns that automated rules miss.
@@ -390,23 +374,23 @@ class FuzzingAgent(BaseAgent):
             )
 
             result = await self._llm_client.analyze(prompt, task="triage")
-            if result and "insights" in result:
-                severity_map = {"critical": Severity.CRITICAL, "high": Severity.HIGH, "medium": Severity.MEDIUM, "low": Severity.LOW}
+            if result and isinstance(result.get("insights"), list):
                 for insight in result["insights"][:8]:
-                    finding = Finding(
-                        title=f"[AI-Fuzz] {insight.get('endpoint_pattern', 'Unknown Pattern')}",
-                        description=insight.get("reasoning", ""),
-                        severity=severity_map.get(insight.get("risk", "medium"), Severity.MEDIUM),
-                        agent_source=AgentType.FUZZER,
-                        target=target,
-                        evidence=f"Pattern: {insight.get('endpoint_pattern', '')}\nRecommended test: {insight.get('recommended_test', '')}",
-                        remediation=insight.get("recommended_test", "Manual testing required."),
-                        tags=["llm", "ai-fuzz", insight.get("category", "other")],
-                        confidence="medium",
-                        status="suspected",
-                    )
-                    self._add_finding(finding)
-                logger.info("[FUZZER] LLM identified {count} patterns from fuzzing results", count=len(result["insights"]))
+                    if not isinstance(insight, dict):
+                        continue
+                    self._llm_hypotheses.append({
+                        "endpoint_pattern": str(insight.get("endpoint_pattern") or "")[:500],
+                        "category": str(insight.get("category") or "other")[:80],
+                        "risk_hint": str(insight.get("risk") or "unknown")[:20],
+                        "reasoning": str(insight.get("reasoning") or "")[:1000],
+                        "next_verification": str(insight.get("recommended_test") or "Manual evidence review required.")[:1000],
+                        "status": "hypothesis",
+                        "source": "llm",
+                    })
+                logger.info(
+                    "[FUZZER] LLM produced {count} endpoint hypotheses (not findings)",
+                    count=len(self._llm_hypotheses),
+                )
 
         except Exception as exc:
             logger.debug("[FUZZER] LLM analysis error: {err}", err=exc)

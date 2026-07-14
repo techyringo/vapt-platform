@@ -35,6 +35,8 @@ export interface Finding {
   target_display?: string;
   evidence: string;
   request_proof?: string;
+  response_proof?: string;
+  poc_steps?: string[];
   remediation: string;
   references: string[];
   cve_ids: string[];
@@ -71,6 +73,9 @@ export interface ToolRun {
   phase: string;
   tool: string;
   success: boolean;
+  partial?: boolean;
+  evidence_captured?: boolean;
+  outcome?: 'completed' | 'partial' | 'timed_out' | 'resource_exhausted' | 'failed';
   exit_code: number;
   duration: number;
   timed_out: boolean;
@@ -126,7 +131,7 @@ export interface NVDStats {
 }
 
 export interface SSEEvent {
-  type: 'scan_started' | 'phase_change' | 'finding' | 'agent_status' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
+  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'agent_status' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
   scan_id: string;
   timestamp: string;
   [key: string]: any;
@@ -193,6 +198,17 @@ export interface AgentDecision {
   hypotheses: string[];
   coverage_gaps: string[];
   model_trace: { used: boolean; provider: string; model: string; error: string };
+  policy?: { decision_authority?: string; model_role?: string };
+  execution?: { mode: string; automatically_executed: boolean; note: string };
+  decision_type?: 'adaptive_capability_plan' | 'execution_outcome';
+  executed_capabilities?: Array<{
+    tool: string;
+    outcome: 'completed' | 'partial' | 'timed_out' | 'resource_exhausted' | 'failed';
+    duration: number;
+    evidence_captured: boolean;
+    exit_code: number;
+  }>;
+  recovery_actions?: Array<{ tool: string; action: string }>;
 }
 
 export interface AttackChain {
@@ -220,6 +236,7 @@ export interface CoverageCheck {
   expected_tools: string[];
   tools_observed?: string[];
   successful_tools?: string[];
+  partial_tools?: string[];
   notes?: string;
 }
 
@@ -229,9 +246,77 @@ export interface ScanCoverage {
     total: number;
     completed: number;
     running: number;
+    partial?: number;
     blind_spots: number;
   };
   checks: CoverageCheck[];
+}
+
+export interface AppSecCoverageLane {
+  status: 'planned' | 'running' | 'completed' | 'partial' | 'unavailable' | 'failed';
+  tool: string;
+  findings?: number;
+  error?: string;
+  verification?: 'active' | 'classification-only' | string;
+  detectors?: Record<string, string>;
+  languages?: Record<string, number>;
+  manifests?: string[];
+  rulepacks?: string[];
+  files?: number;
+  source_files?: number;
+  scanned_files?: number;
+  skipped_files?: number;
+  scanner_errors?: number;
+  duration_seconds?: number;
+  limitation?: string;
+}
+
+export interface AppSecFinding {
+  id: number;
+  fingerprint: string;
+  source: string;
+  category: 'sast' | 'sca' | 'iac' | 'secret' | string;
+  rule_id: string;
+  title: string;
+  description: string;
+  severity: SeverityKey;
+  confidence: string;
+  status: string;
+  repository: string;
+  path: string;
+  start_line?: number;
+  end_line?: number;
+  package?: string;
+  installed_version?: string;
+  fixed_version?: string;
+  cve_ids: string[];
+  cwe_ids: string[];
+  references: string[];
+  evidence: string;
+  remediation: string;
+}
+
+export interface AppSecAssessment {
+  assessment_id: string;
+  name: string;
+  repository: string;
+  ref: string;
+  commit_sha: string;
+  status: 'queued' | 'running' | 'partial' | 'completed' | 'failed';
+  phase: string;
+  progress: number;
+  coverage: Record<string, AppSecCoverageLane>;
+  summary: {
+    total?: number;
+    severities?: Partial<Record<SeverityKey, number>>;
+    categories?: Record<string, number>;
+    unavailable?: string[];
+  };
+  error?: string;
+  created_at: string;
+  updated_at: string;
+  findings?: AppSecFinding[];
+  tool_runs?: Array<Record<string, unknown>>;
 }
 
 export interface LLMFallbackProvider {

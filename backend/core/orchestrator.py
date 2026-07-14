@@ -129,6 +129,7 @@ class Orchestrator:
         # Callbacks
         self._on_finding_callbacks: list[Callable[[Finding], Any]] = []
         self._on_phase_change_callbacks: list[Callable[[str, str], Any]] = []
+        self._on_phase_complete_callbacks: list[Callable[[str, ScanResult], Any]] = []
         self._on_agent_start_callbacks: list[Callable[[str, str], Any]] = []
         self._on_agent_complete_callbacks: list[Callable[[str, int], Any]] = []
         self._on_log_callbacks: list[Callable[[str, str], Any]] = []
@@ -229,6 +230,10 @@ class Orchestrator:
         """Register a callback for phase transitions (phase, message)."""
         self._on_phase_change_callbacks.append(callback)
 
+    def on_phase_complete(self, callback: Callable[[str, ScanResult], Any]) -> None:
+        """Register a callback after phase results have been attached."""
+        self._on_phase_complete_callbacks.append(callback)
+
     def on_agent_start(self, callback: Callable[[str, str], Any]) -> None:
         """Register a callback when an agent starts (agent_type, tool_name)."""
         self._on_agent_start_callbacks.append(callback)
@@ -250,6 +255,13 @@ class Orchestrator:
         for cb in self._on_phase_change_callbacks:
             try:
                 cb(phase, message)
+            except Exception:
+                pass
+
+    def _fire_phase_complete(self, phase: str, scan_result: ScanResult) -> None:
+        for cb in self._on_phase_complete_callbacks:
+            try:
+                cb(phase, scan_result)
             except Exception:
                 pass
 
@@ -420,6 +432,7 @@ class Orchestrator:
             self._fire_phase_change(phase.value, f"Phase: {phase.value}")
             logger.info("Pipeline phase: {phase}", phase=phase.value)
             await self._run_phase(phase, scan_result)
+            self._fire_phase_complete(phase.value, scan_result)
 
         if not self._state_machine.is_terminal:
             self._state_machine.transition(ScanPhase.COMPLETED)

@@ -139,15 +139,17 @@ class ReconAgent(BaseAgent):
             # Fallback: direct HTTP probe when httpx tool is not available
             live_urls = await self._direct_http_probe(probe_inputs, technologies)
 
-        # Fallback early so URL crawlers and downstream phases still receive
-        # a usable web root when passive/live probing finds nothing.
+        # Never promote an unverified seed into a live application. Doing so
+        # made every later phase look healthy even when httpx only resolved a
+        # host or the Python body probe failed. Downstream web agents now run
+        # only when a response body (including a legitimate auth/block page)
+        # was actually retrieved.
         if not live_urls:
-            fallback_url = target.base_url
             logger.warning(
-                "[RECON] No live URLs discovered — seeding with primary target {url} "
-                "(downstream agents will still scan it)", url=fallback_url,
+                "[RECON] No body-verified HTTP application response for {url}; "
+                "web discovery and DAST will remain blocked",
+                url=target.base_url,
             )
-            live_urls = [{"url": fallback_url, "status": 0, "title": "", "tech": [], "server": ""}]
 
         # Collect historical URLs in parallel
         url_tasks = []
@@ -195,6 +197,16 @@ class ReconAgent(BaseAgent):
             "total_live_urls": len(live_urls),
             "total_historical_urls": len(scoped_urls),
             "total_crawled_urls": len(scoped_crawled_urls),
+            "target_health": {
+                "status": "ready" if live_urls else "unreachable",
+                "body_verified": bool(live_urls),
+                "verified_urls": len(live_urls),
+                "reason": (
+                    "At least one in-scope HTTP response body was verified."
+                    if live_urls
+                    else "No in-scope HTTP response body could be retrieved."
+                ),
+            },
             "tool_runs": self.get_tool_runs(),
         }
 
@@ -268,10 +280,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="amass",
             args=["enum", "-passive", "-d", domain, "-o", "/dev/stdout"] + extra_args,
-            timeout=600,
+            timeout=max(30, int(os.environ.get("VAPT_AMASS_TIMEOUT", "180"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success:
+        if result.stdout.strip():
             subs = OutputParser.parse_subfinder(result.stdout)
             logger.info("[RECON] amass: {count} subdomains", count=len(subs))
             return subs
@@ -283,10 +295,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="assetfinder",
             args=["--subs-only", domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_ASSETFINDER_TIMEOUT", "120"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             subs = OutputParser.parse_subfinder(result.stdout)
             logger.info("[RECON] assetfinder: {count} subdomains", count=len(subs))
             return subs
@@ -420,8 +432,16 @@ class ReconAgent(BaseAgent):
                     if self.is_in_scope(entry.get("url", ""))
                 ]
                 await self._verify_http_bodies(parsed)
-                logger.info("[RECON] httpx: {live} live URLs", live=len(parsed))
-                return parsed
+                verified = [
+                    entry for entry in parsed
+                    if entry.get("body_verified") and entry.get("body_usable")
+                ]
+                rejected = len(parsed) - len(verified)
+                logger.info(
+                    "[RECON] httpx: {live} body-verified URLs ({rejected} rejected)",
+                    live=len(verified), rejected=rejected,
+                )
+                return verified
             if result.stderr:
                 logger.warning("[RECON] httpx failed: {err}", err=result.stderr[:500])
             return []
@@ -453,6 +473,8 @@ class ReconAgent(BaseAgent):
             from core.http_evidence import fingerprint_response
             fp = fingerprint_response(response)
             body = (response.text or "")[:100_000].lower()
+            blocked = response.status_code in {401, 403, 407, 429}
+            usable = fp.length > 0 and response.status_code < 500
             tech = {str(item) for item in (entry.get("tech") or []) if item}
             header_hints = (
                 response.headers.get("server", ""),
@@ -479,6 +501,8 @@ class ReconAgent(BaseAgent):
                 "content_length": fp.length,
                 "body_sha256": fp.digest,
                 "body_verified": True,
+                "body_usable": usable,
+                "access_state": "restricted" if blocked else "available" if usable else "invalid",
                 "tech": sorted(tech),
             })
             logger.info(
@@ -494,10 +518,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="waybackurls",
             args=[domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_WAYBACK_TIMEOUT", "120"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
             logger.info("[RECON] waybackurls: {count} URLs", count=len(urls))
             return urls
@@ -508,10 +532,10 @@ class ReconAgent(BaseAgent):
         result = await self._runner.run(
             tool_name="gau",
             args=["--subs", "--threads", "5", domain],
-            timeout=300,
+            timeout=max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "180"))),
         )
         self._record_tool_run(result, "recon")
-        if result.success and result.stdout.strip():
+        if result.stdout.strip():
             urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
             logger.info("[RECON] gau: {count} URLs", count=len(urls))
             return urls
@@ -533,6 +557,10 @@ class ReconAgent(BaseAgent):
         # future distributed worker pass; this gives VA mode broad signal now.
         seeds = seeds[:25]
         extra_args = self.config.tools.get("katana", AppConfig().get_tool_config("katana")).extra_args
+        crawl_seconds = max(30, int(os.environ.get("VAPT_KATANA_CRAWL_DURATION", "240")))
+        tool_timeout = max(crawl_seconds + 30, int(os.environ.get("VAPT_KATANA_TIMEOUT", "330")))
+        if "-ct" not in extra_args and "-crawl-duration" not in extra_args:
+            extra_args = list(extra_args) + ["-ct", f"{crawl_seconds}s"]
 
         from tools.runner import shared_temp_path
         host_path = shared_temp_path(suffix=".txt")
@@ -543,7 +571,7 @@ class ReconAgent(BaseAgent):
             result = await self._runner.run(
                 tool_name="katana",
                 args=["-list", host_path, "-silent", "-jsonl"] + extra_args,
-                timeout=600,
+                timeout=tool_timeout,
             )
             self._record_tool_run(result, "recon")
             if (
@@ -556,7 +584,7 @@ class ReconAgent(BaseAgent):
                 result = await self._runner.run(
                     tool_name="katana",
                     args=["-list", host_path] + extra_args,
-                    timeout=600,
+                    timeout=tool_timeout,
                 )
                 self._record_tool_run(result, "recon")
             if result.stdout.strip():
@@ -568,7 +596,6 @@ class ReconAgent(BaseAgent):
             return []
         finally:
             try:
-                import os
                 os.unlink(host_path)
             except OSError:
                 pass
@@ -691,25 +718,37 @@ class ReconAgent(BaseAgent):
                             final=final_url,
                         )
                         continue
+                    from core.http_evidence import fingerprint_response
+
+                    fp = fingerprint_response(resp)
+                    final = urlparse(final_url)
+                    usable = fp.length > 0 and resp.status_code < 500
                     entry = {
                         "url": final_url,
                         "status": resp.status_code,
+                        "status_code": resp.status_code,
                         "title": title,
-                        "content_length": len(resp.content),
+                        "content_type": fp.content_type,
+                        "content_length": fp.length,
+                        "body_sha256": fp.digest,
+                        "body_verified": True,
+                        "body_usable": usable,
+                        "access_state": "restricted" if resp.status_code in {401, 403, 407, 429} else "available" if usable else "invalid",
                         "tech": tech_hints,
                         "server": server,
-                        "scheme": scheme,
+                        "scheme": final.scheme,
                     }
-                    results.append(entry)
+                    if usable:
+                        results.append(entry)
 
                     if tech_hints:
-                        hostname = host
+                        hostname = final.hostname or urlparse(url).hostname or raw
                         technologies[hostname] = tech_hints
 
                     logger.info("[RECON] Direct probe: {status} {url} [{title}] tech={tech}", status=resp.status_code, url=final_url, title=title, tech=tech_hints)
 
                     # HTTPS worked, skip HTTP
-                    if scheme == "https" and resp.status_code < 400:
+                    if final.scheme == "https" and resp.status_code < 400:
                         break
 
                 except Exception as exc:

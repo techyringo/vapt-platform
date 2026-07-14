@@ -434,7 +434,7 @@ class ScopeConfig(BaseModel):
     max_requests_total: int = Field(default=50000, ge=1, description="Hard request cap")
     exclude_paths: list[str] = Field(default_factory=list, description="Paths to exclude")
     include_paths: Optional[list[str]] = Field(default=None, description="Paths to force-include")
-    rate_limit: int = Field(default=50, ge=1, description="Requests per second")
+    rate_limit: int = Field(default=5, ge=1, description="Requests per second")
     auth_token: Optional[str] = Field(default=None, description="Authentication token")
     auth_type: Optional[str] = Field(
         default=None,

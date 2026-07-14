@@ -110,3 +110,19 @@ async def pull_tool_images(
 
     targets = images or TIER1_IMAGES
     return await runner.pull_required_images(targets)
+
+
+async def run_appsec_assessment(
+    ctx: dict[str, Any],
+    assessment_id: str,
+    repository: str,
+    ref: str = "main",
+) -> dict[str, Any]:
+    """Run a durable repository assessment and persist every result in SQLite."""
+    from services.appsec_assessment import run_assessment
+
+    config = ctx.get("config")
+    if config is None:
+        from core.config import AppConfig
+        config = AppConfig()
+    return await run_assessment(assessment_id, repository, ref, config)

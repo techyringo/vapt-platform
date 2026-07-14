@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextvars
 import json
 import os
+import re
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -49,6 +50,114 @@ def _event_redis_url() -> str:
 
 _pub_client: Any = None
 _pub_disabled = False
+
+_SECRET_VALUE_RE = re.compile(
+    r"(?i)(\b(?:api[_-]?key|token|secret|password|passwd)\b\s*[:=]\s*)([^\s,;]+)"
+)
+_HEADER_SECRET_RE = re.compile(
+    r"(?i)(\b(?:authorization|cookie|set-cookie)\b\s*[:=]\s*)([^\r\n]+)"
+)
+
+
+def redact_tool_log_line(line: str) -> str:
+    """Bound and redact a live line before it reaches console or SSE output."""
+    bounded = str(line).replace("\x00", "")[:2000]
+    bounded = _HEADER_SECRET_RE.sub(r"\1<redacted>", bounded)
+    return _SECRET_VALUE_RE.sub(r"\1<redacted>", bounded)
+
+
+def prepare_tool_log_line(line: str, tool: str = "") -> str:
+    """Turn verbose scanner output into a compact, operator-safe live event.
+
+    Full stdout/stderr remains in the durable tool artifact. The live stream is
+    intentionally summarized so minified JavaScript and scanner JSON do not
+    overwhelm the UI or container logs.
+    """
+    raw = str(line).strip().replace("\x00", "")
+    if not raw:
+        return ""
+    try:
+        payload = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        # Katana can emit entire minified response bodies as one line. Those
+        # belong in the downloadable artifact, not the operational event feed.
+        if len(raw) > 800 and tool.lower() in {"katana", "hakrawler", "gau", "waybackurls"}:
+            return ""
+        return redact_tool_log_line(raw[:600])
+
+    if not isinstance(payload, dict):
+        return redact_tool_log_line(json.dumps(payload, separators=(",", ":"))[:600])
+
+    tool_name = tool.lower()
+    if tool_name == "httpx":
+        method = str(payload.get("method") or "GET")
+        url = str(payload.get("url") or payload.get("input") or "target")
+        status = payload.get("status_code")
+        tech = ", ".join(str(item) for item in (payload.get("tech") or [])[:5])
+        suffix = f" · {tech}" if tech else ""
+        return redact_tool_log_line(f"{method} {url} → HTTP {status or 'unknown'}{suffix}")
+
+    if tool_name == "katana":
+        request = payload.get("request") if isinstance(payload.get("request"), dict) else {}
+        endpoint = request.get("endpoint") or payload.get("url") or payload.get("endpoint")
+        error = str(payload.get("error") or "")
+        if error.lower() in {"max depth reached", "duplicate endpoint"}:
+            return ""
+        if endpoint:
+            method = request.get("method") or "GET"
+            suffix = f" · {error}" if error else ""
+            return redact_tool_log_line(f"discovered {method} {endpoint}{suffix}")
+
+    # Generic JSONL scanners: retain only useful scalar evidence fields.
+    keys = (
+        "template-id", "template_id", "name", "host", "url", "matched-at",
+        "matched_at", "endpoint", "severity", "status_code", "level", "message",
+    )
+    compact = {key: payload[key] for key in keys if key in payload and not isinstance(payload[key], (dict, list))}
+    if compact:
+        return redact_tool_log_line(json.dumps(compact, separators=(",", ":"))[:600])
+    return ""
+
+
+def classify_tool_log_level(line: str, stream: str = "stdout") -> str:
+    """Classify a normalized event without treating JSON field names as failures."""
+    lowered = line.lower()
+    if re.search(r"(?:fatal|exception|traceback|\bfailed\b|\bfailure\b)", lowered):
+        return "error"
+    if re.search(r"(?:\bwarn(?:ing)?\b|timed?\s*out|rate.?limit|retry|connection reset)", lowered):
+        return "warn"
+    return "info"
+
+
+def _mirror_tool_log(msg: dict[str, Any]) -> None:
+    """Mirror sampled tool output into worker/API container logs."""
+    enabled = os.environ.get("VAPT_TOOL_LOG_MIRROR", "true").lower() in {"1", "true", "yes"}
+    if not enabled:
+        return
+    try:
+        configured_max = int(os.environ.get("VAPT_TOOL_LOG_MIRROR_MAX_CHARS", "1000"))
+    except ValueError:
+        configured_max = 1000
+    max_chars = max(120, min(configured_max, 2000))
+    rendered = str(msg.get("line") or "")[:max_chars]
+    level = str(msg.get("level") or "info")
+    if level == "error":
+        log = logger.error
+    elif level == "warn":
+        log = logger.warning
+    else:
+        # Many CLI tools write normal progress to stderr; the stream alone is
+        # not a reliable severity signal.
+        log = logger.info
+    log(
+        "[tool_stream] scan={scan} agent={agent} phase={phase} tool={tool} stream={stream} | {line}",
+        scan=msg.get("scan_id", ""),
+        agent=msg.get("agent", ""),
+        phase=msg.get("phase", ""),
+        tool=msg.get("tool", ""),
+        stream=msg.get("stream", "stdout"),
+        line=rendered,
+    )
 
 
 async def _get_publisher() -> Any:
@@ -85,8 +194,8 @@ async def publish_tool_log(
     """Best-effort publish of one tool-log line. Never raises."""
     if not scan_id or not line:
         return
-    client = await _get_publisher()
-    if client is None:
+    prepared = prepare_tool_log_line(line, tool)
+    if not prepared:
         return
     msg = {
         "scan_id": scan_id,
@@ -94,9 +203,14 @@ async def publish_tool_log(
         "agent": agent,
         "phase": phase,
         "stream": stream,
-        "line": line[:2000],
+        "line": prepared,
+        "level": classify_tool_log_level(prepared, stream),
         "ts": time.time(),
     }
+    _mirror_tool_log(msg)
+    client = await _get_publisher()
+    if client is None:
+        return
     try:
         await client.publish(TOOL_LOG_CHANNEL, json.dumps(msg))
     except Exception as exc:

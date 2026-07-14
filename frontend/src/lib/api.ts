@@ -79,6 +79,18 @@ export const api = {
     return fetchAPI<{ events: import('@/types').SSEEvent[] }>(`/api/events?${params}`);
   },
 
+  startAppSecAssessment: (repository: string, ref: string, name: string) =>
+    fetchAPI<{ assessment_id: string; status: string }>('/api/appsec/assessments', {
+      method: 'POST',
+      body: JSON.stringify({ repository, ref, name }),
+    }),
+
+  listAppSecAssessments: () =>
+    fetchAPI<{ assessments: import('@/types').AppSecAssessment[] }>('/api/appsec/assessments'),
+
+  getAppSecAssessment: (id: string) =>
+    fetchAPI<import('@/types').AppSecAssessment>(`/api/appsec/assessments/${id}`),
+
   downloadReport: (id: string, format: string = 'html') =>
     apiUrl(`/api/scans/${id}/report?format=${format}`),
 
@@ -99,6 +111,11 @@ export const api = {
 
   downloadLog: (name: string) =>
     apiUrl(`/api/system/logs/${encodeURIComponent(name)}/download`),
+
+  deleteLog: (name: string) =>
+    fetchAPI<{ name: string; action: 'cleared' | 'deleted' }>(`/api/system/logs/${encodeURIComponent(name)}`, {
+      method: 'DELETE',
+    }),
 
   // LLM configuration (runtime, frontend-configurable — no hardcoded model)
   getLLMConfig: () =>
