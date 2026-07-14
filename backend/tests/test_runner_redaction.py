@@ -1,4 +1,12 @@
-from tools.runner import ToolResult, redact_command
+import sys
+from pathlib import Path
+
+import pytest
+
+import tools.runner as runner_module
+from core.live_log import tool_log_context
+from database.store import PersistenceStore
+from tools.runner import DockerRunner, ToolResult, redact_command
 
 
 def test_redact_command_hides_api_id_env_assignment():
@@ -50,3 +58,33 @@ def test_nonzero_osint_exit_with_urls_preserves_partial_evidence() -> None:
     assert result.partial is True
     assert result.outcome == "partial"
     assert result.to_dict()["evidence_captured"] is True
+
+
+@pytest.mark.asyncio
+async def test_tool_output_is_disk_first_and_memory_bounded(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(runner_module, "SHARED_DIR", str(tmp_path))
+    monkeypatch.setenv("VAPT_TOOL_RESULT_MAX_BYTES", "65536")
+    token = tool_log_context.set({"scan_id": "scan-1", "agent": "recon", "phase": "recon"})
+    try:
+        result = await DockerRunner._execute_command(
+            "python",
+            [sys.executable, "-c", 'import sys; sys.stdout.write("x"*100000)'],
+            None,
+            10,
+        )
+    finally:
+        tool_log_context.reset(token)
+
+    assert result.success is True
+    assert result.stdout_truncated is True
+    assert len(result.stdout.encode()) == 65536
+    source = Path(result.stdout_artifact_path)
+    assert source.stat().st_size == 100000
+
+    store = PersistenceStore(f"sqlite:///{tmp_path / 'vapt.db'}")
+    run = result.to_dict() | {"phase": "recon"}
+    store.append_tool_run("scan-1", "recon", run)
+    persisted = store.load_tool_runs("scan-1")[0]
+    assert persisted["stdout_size"] == 100000
+    assert Path(persisted["stdout_artifact_path"]).is_file()
+    assert source.exists() is False

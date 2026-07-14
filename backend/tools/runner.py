@@ -261,6 +261,10 @@ class ToolResult:
         command_preview: str = "",
         oom_killed: bool = False,
         timeout_reason: str = "",
+        stdout_artifact_path: str = "",
+        stderr_artifact_path: str = "",
+        stdout_truncated: bool = False,
+        stderr_truncated: bool = False,
     ) -> None:
         self.tool_name = tool_name
         self.exit_code = exit_code
@@ -274,6 +278,10 @@ class ToolResult:
         # be persisted unconditionally to the tool_runs record.
         self.oom_killed = oom_killed
         self.timeout_reason = timeout_reason
+        self.stdout_artifact_path = stdout_artifact_path
+        self.stderr_artifact_path = stderr_artifact_path
+        self.stdout_truncated = stdout_truncated
+        self.stderr_truncated = stderr_truncated
 
     @property
     def success(self) -> bool:
@@ -321,6 +329,22 @@ class ToolResult:
     def output(self) -> str:
         return self.stdout
 
+    def read_stdout(self, max_bytes: int = 64 * 1024 * 1024) -> str:
+        """Read complete local output for an in-worker parser when available.
+
+        Queued results remain bounded, but AppSec parsers execute in the same
+        worker as the spool file and can consume the complete scanner document.
+        The upper bound prevents a corrupt scanner from becoming an unbounded
+        file read.
+        """
+        if not self.stdout_truncated or not self.stdout_artifact_path:
+            return self.stdout
+        try:
+            with Path(self.stdout_artifact_path).open("rb") as handle:
+                return handle.read(max(1, max_bytes)).decode("utf-8", errors="replace")
+        except OSError:
+            return self.stdout
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "tool": self.tool_name,
@@ -336,6 +360,10 @@ class ToolResult:
             "timeout_reason": self.timeout_reason,
             "stdout": self.stdout,
             "stderr": self.stderr[:50_000],
+            "stdout_source_path": self.stdout_artifact_path,
+            "stderr_source_path": self.stderr_artifact_path,
+            "stdout_truncated": self.stdout_truncated,
+            "stderr_truncated": self.stderr_truncated,
         }
 
     @classmethod
@@ -350,6 +378,10 @@ class ToolResult:
             command_preview=data.get("command_preview", ""),
             oom_killed=data.get("oom_killed", False),
             timeout_reason=data.get("timeout_reason", ""),
+            stdout_artifact_path=data.get("stdout_source_path", ""),
+            stderr_artifact_path=data.get("stderr_source_path", ""),
+            stdout_truncated=data.get("stdout_truncated", False),
+            stderr_truncated=data.get("stderr_truncated", False),
         )
 
 
@@ -1052,12 +1084,47 @@ class DockerRunner:
         """Execute a command with timeout and output capture."""
         start = time.monotonic()
         proc = None
+        spool_dir = Path(SHARED_DIR) / "runner-spool"
+        spool_dir.mkdir(parents=True, exist_ok=True)
+        stdout_spool = tempfile.NamedTemporaryFile(prefix="stdout_", suffix=".log", dir=spool_dir, delete=False)
+        stderr_spool = tempfile.NamedTemporaryFile(prefix="stderr_", suffix=".log", dir=spool_dir, delete=False)
+        stdout_spool_path = stdout_spool.name
+        stderr_spool_path = stderr_spool.name
+        try:
+            capture_limit = max(64 * 1024, min(int(os.environ.get("VAPT_TOOL_RESULT_MAX_BYTES", str(2 * 1024 * 1024))), 16 * 1024 * 1024))
+        except ValueError:
+            capture_limit = 2 * 1024 * 1024
+        spool_closed = False
+
+        def _close_spools() -> None:
+            nonlocal spool_closed
+            if spool_closed:
+                return
+            spool_closed = True
+            for handle in (stdout_spool, stderr_spool):
+                try:
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                    handle.close()
+                except Exception:
+                    pass
         # Live-log context for streaming this tool's output to the UI. Full
         # output is still captured to the artifact file; this is only the
         # sampled live view.
         log_ctx = dict(tool_log_context.get() or {})
         log_scan_id = str(log_ctx.get("scan_id", ""))
         throttler = LineThrottler()
+
+        def _spool_paths_for_result() -> tuple[str, str]:
+            _close_spools()
+            if log_scan_id:
+                return stdout_spool_path, stderr_spool_path
+            for value in (stdout_spool_path, stderr_spool_path):
+                try:
+                    Path(value).unlink(missing_ok=True)
+                except OSError:
+                    pass
+            return "", ""
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
@@ -1070,14 +1137,22 @@ class DockerRunner:
 
             stdout_chunks: list[bytes] = []
             stderr_chunks: list[bytes] = []
+            captured = {"stdout": 0, "stderr": 0}
+            total = {"stdout": 0, "stderr": 0}
 
-            async def _read_stream(stream: Any, chunks: list[bytes], stream_name: str) -> None:
+            async def _read_stream(stream: Any, chunks: list[bytes], stream_name: str, spool: Any) -> None:
                 buffered = b""
                 while True:
                     chunk = await stream.read(65536)
                     if not chunk:
                         break
-                    chunks.append(chunk)
+                    spool.write(chunk)
+                    total[stream_name] += len(chunk)
+                    remaining = capture_limit - captured[stream_name]
+                    if remaining > 0:
+                        retained = chunk[:remaining]
+                        chunks.append(retained)
+                        captured[stream_name] += len(retained)
                     if not log_scan_id:
                         continue
                     # Split into lines for live streaming (keep partial tail).
@@ -1110,14 +1185,15 @@ class DockerRunner:
                     stream="meta",
                 )
 
-            stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_chunks, "stdout"))
-            stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_chunks, "stderr"))
+            stdout_task = asyncio.create_task(_read_stream(proc.stdout, stdout_chunks, "stdout", stdout_spool))
+            stderr_task = asyncio.create_task(_read_stream(proc.stderr, stderr_chunks, "stderr", stderr_spool))
 
             await asyncio.wait_for(
                 asyncio.gather(proc.wait(), stdout_task, stderr_task),
                 timeout=timeout,
             )
 
+            result_stdout_path, result_stderr_path = _spool_paths_for_result()
             duration = time.monotonic() - start
             stdout = b"".join(stdout_chunks)
             stderr = b"".join(stderr_chunks)
@@ -1128,6 +1204,10 @@ class DockerRunner:
                 stderr=stderr.decode("utf-8", errors="replace"),
                 duration=duration,
                 command_preview=redact_command(cmd),
+                stdout_artifact_path=result_stdout_path,
+                stderr_artifact_path=result_stderr_path,
+                stdout_truncated=total["stdout"] > captured["stdout"],
+                stderr_truncated=total["stderr"] > captured["stderr"],
             )
 
         except asyncio.TimeoutError:
@@ -1139,6 +1219,7 @@ class DockerRunner:
                     await proc.wait()
                 except Exception:
                     pass
+            result_stdout_path, result_stderr_path = _spool_paths_for_result()
             stdout = b"".join(locals().get("stdout_chunks", []))
             stderr = b"".join(locals().get("stderr_chunks", []))
             stderr_text = stderr.decode("utf-8", errors="replace")
@@ -1154,9 +1235,16 @@ class DockerRunner:
                 duration=duration, timed_out=True,
                 command_preview=redact_command(cmd),
                 timeout_reason=timeout_text,
+                stdout_artifact_path=result_stdout_path,
+                stderr_artifact_path=result_stderr_path,
+                stdout_truncated=locals().get("total", {}).get("stdout", 0) > locals().get("captured", {}).get("stdout", 0),
+                stderr_truncated=locals().get("total", {}).get("stderr", 0) > locals().get("captured", {}).get("stderr", 0),
             )
 
         except FileNotFoundError:
+            _close_spools()
+            for value in (stdout_spool_path, stderr_spool_path):
+                Path(value).unlink(missing_ok=True)
             duration = time.monotonic() - start
             logger.error("[{tool}] Command not found: {cmd}", tool=tool_name, cmd=cmd[0])
             return ToolResult(
@@ -1167,6 +1255,9 @@ class DockerRunner:
             )
 
         except Exception as exc:
+            _close_spools()
+            for value in (stdout_spool_path, stderr_spool_path):
+                Path(value).unlink(missing_ok=True)
             duration = time.monotonic() - start
             logger.error("[{tool}] Execution error: {err}", tool=tool_name, err=exc)
             return ToolResult(

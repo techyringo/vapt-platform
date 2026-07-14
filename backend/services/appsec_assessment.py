@@ -236,9 +236,10 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
                 coverage["iac"]["status"] = "running"
             store.update_appsec_assessment(assessment_id, {"phase": lane, "progress": 15 + index * 20, "coverage": coverage})
             result = await runner.run_local(tool, args, timeout=900)
+            scanner_stdout = result.read_stdout()
             store.append_appsec_run(assessment_id, lane, result.to_dict())
-            if result.stdout.strip():
-                payload = _json_payload(result.stdout)
+            if scanner_stdout.strip():
+                payload = _json_payload(scanner_stdout)
                 parsed = parser(payload, repository)
                 findings.extend(parsed)
                 findings = _deduplicate_findings(findings)
@@ -288,11 +289,12 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             ],
             timeout=900,
         )
-        store.append_appsec_run(assessment_id, "sbom", sbom_result.to_dict())
         sbom_state: dict[str, object] = {"status": "unavailable"}
-        if sbom_result.stdout.strip():
+        sbom_stdout = sbom_result.read_stdout()
+        store.append_appsec_run(assessment_id, "sbom", sbom_result.to_dict())
+        if sbom_stdout.strip():
             try:
-                sbom_payload = _json_payload(sbom_result.stdout)
+                sbom_payload = _json_payload(sbom_stdout)
                 if sbom_payload.get("bomFormat") == "CycloneDX":
                     artifact = store.save_appsec_artifact(
                         assessment_id,
@@ -351,8 +353,9 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         else:
             truffle_args.extend(["--no-verification", "--results=unverified,unknown"])
         truffle_result = await runner.run_local("trufflehog", truffle_args, timeout=900)
+        truffle_stdout = truffle_result.read_stdout()
         store.append_appsec_run(assessment_id, lane, truffle_result.to_dict())
-        findings.extend(parse_trufflehog(truffle_result.stdout, repository))
+        findings.extend(parse_trufflehog(truffle_stdout, repository))
         findings = merge_secret_findings(findings)
         findings = _deduplicate_findings(findings)
 

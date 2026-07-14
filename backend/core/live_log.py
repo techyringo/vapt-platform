@@ -211,6 +211,16 @@ async def publish_tool_log(
     prepared = prepare_tool_log_line(line, tool)
     if not prepared:
         return
+    level = classify_tool_log_level(prepared, stream)
+    # Operational telemetry is intentionally not a duplicate of stdout. Full
+    # output is retained by the tool-run artifact. The default stream carries
+    # commands plus warning/error lines; operators can opt into sampled output
+    # for a controlled troubleshooting session with VAPT_TOOL_LOG_MODE=sampled.
+    mode = os.environ.get("VAPT_TOOL_LOG_MODE", "summary").strip().lower()
+    if mode == "off":
+        return
+    if mode == "summary" and stream != "meta" and level not in {"warn", "error"}:
+        return
     msg = {
         "scan_id": scan_id,
         "tool": tool,
@@ -218,7 +228,7 @@ async def publish_tool_log(
         "phase": phase,
         "stream": stream,
         "line": prepared,
-        "level": classify_tool_log_level(prepared, stream),
+        "level": level,
         "ts": time.time(),
     }
     _mirror_tool_log(msg)
@@ -239,7 +249,19 @@ class LineThrottler:
     sampled.
     """
 
-    def __init__(self, max_lines: int = 400, max_per_sec: float = 20.0) -> None:
+    def __init__(self, max_lines: Optional[int] = None, max_per_sec: Optional[float] = None) -> None:
+        if max_lines is None:
+            try:
+                max_lines = int(os.environ.get("VAPT_TOOL_LOG_MAX_LINES", "80"))
+            except ValueError:
+                max_lines = 80
+        if max_per_sec is None:
+            try:
+                max_per_sec = float(os.environ.get("VAPT_TOOL_LOG_MAX_PER_SECOND", "4"))
+            except ValueError:
+                max_per_sec = 4.0
+        max_lines = max(0, min(max_lines, 1000))
+        max_per_sec = max(0.0, min(max_per_sec, 50.0))
         self._max_lines = max_lines
         self._min_interval = 1.0 / max_per_sec if max_per_sec > 0 else 0.0
         self._count = 0

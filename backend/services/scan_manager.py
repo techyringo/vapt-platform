@@ -98,7 +98,10 @@ class ScanManager:
         self._scans: dict[str, dict] = {}          # scan_id -> scan data
         self._findings: dict[str, list[dict]] = {}  # scan_id -> findings
         self._agent_status: dict[str, dict[str, AgentStatus]] = {}  # scan_id -> agent_type -> status
-        self._events: list[asyncio.Queue] = []      # SSE client queues
+        # Queue -> channel. Control-plane clients never receive raw tool-line
+        # traffic, so a chatty crawler cannot evict lifecycle events from their
+        # bounded queue.
+        self._events: dict[asyncio.Queue, str] = {}  # SSE client queues
         self._event_history: list[dict] = []         # recent events replayed to new SSE clients
         self._nvd = NVDService()
         self._scan_id_counter = 0
@@ -161,8 +164,9 @@ class ScanManager:
                 continue
         self._scan_id_counter = highest_counter
 
-    def subscribe_events(self, after_sequence: int = 0) -> asyncio.Queue:
+    def subscribe_events(self, after_sequence: int = 0, channel: str = "all") -> asyncio.Queue:
         """Subscribe to scan events. Returns a queue for SSE streaming."""
+        channel = channel if channel in {"all", "control", "telemetry"} else "control"
         queue = asyncio.Queue(maxsize=500)
         replay = (
             self._store.load_events_after(after_sequence, limit=500)
@@ -170,17 +174,20 @@ class ScanManager:
             else self._event_history[-200:]
         )
         for event in replay:
+            if channel == "telemetry" and event.get("type") != "tool_log":
+                continue
+            if channel == "control" and event.get("type") == "tool_log":
+                continue
             try:
                 queue.put_nowait(self._display_event(event))
             except asyncio.QueueFull:
                 break
-        self._events.append(queue)
+        self._events[queue] = channel
         return queue
 
     def unsubscribe_events(self, queue: asyncio.Queue) -> None:
         """Remove an SSE subscriber."""
-        if queue in self._events:
-            self._events.remove(queue)
+        self._events.pop(queue, None)
 
     def get_recent_events(self, scan_id: Optional[str] = None, limit: int = 200) -> list[dict]:
         """Return recent events for polling/recovery clients."""
@@ -394,7 +401,12 @@ class ScanManager:
             if len(self._event_history) > 1000:
                 self._event_history = self._event_history[-1000:]
         dead_queues = []
-        for queue in self._events:
+        event_type = str(display_payload.get("type") or display_payload.get("event") or "")
+        for queue, channel in list(self._events.items()):
+            if channel == "control" and event_type == "tool_log":
+                continue
+            if channel == "telemetry" and event_type != "tool_log":
+                continue
             try:
                 queue.put_nowait(display_payload)
             except asyncio.QueueFull:

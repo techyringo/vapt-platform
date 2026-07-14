@@ -16,6 +16,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import sqlite3
 import uuid
 from pathlib import Path
@@ -309,6 +310,12 @@ class PersistenceStore:
                     duration REAL NOT NULL DEFAULT 0,
                     timed_out INTEGER NOT NULL DEFAULT 0,
                     stderr_snippet TEXT NOT NULL DEFAULT '',
+                    stdout_artifact_path TEXT NOT NULL DEFAULT '',
+                    stderr_artifact_path TEXT NOT NULL DEFAULT '',
+                    stdout_sha256 TEXT NOT NULL DEFAULT '',
+                    stderr_sha256 TEXT NOT NULL DEFAULT '',
+                    stdout_size INTEGER NOT NULL DEFAULT 0,
+                    stderr_size INTEGER NOT NULL DEFAULT 0,
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(assessment_id) REFERENCES appsec_assessments(assessment_id) ON DELETE CASCADE
                 );
@@ -351,6 +358,12 @@ class PersistenceStore:
             self._ensure_column(conn, "tool_runs", "stderr_size", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "tool_runs", "oom_killed", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "tool_runs", "timeout_reason", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "appsec_tool_runs", "stdout_artifact_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "appsec_tool_runs", "stderr_artifact_path", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "appsec_tool_runs", "stdout_sha256", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "appsec_tool_runs", "stderr_sha256", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "appsec_tool_runs", "stdout_size", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_column(conn, "appsec_tool_runs", "stderr_size", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "findings", "evidence_score", "REAL NOT NULL DEFAULT 0")
             self._ensure_column(conn, "findings", "evidence_grade", "TEXT NOT NULL DEFAULT 'E'")
             self._ensure_column(conn, "findings", "validation_notes_json", "TEXT NOT NULL DEFAULT '[]'")
@@ -392,9 +405,12 @@ class PersistenceStore:
         text: str,
         created_at: str,
     ) -> dict[str, Any]:
+        source_key = f"{stream_name}_source_path"
+        source_path = Path(str(run.get(source_key) or ""))
         raw = text or ""
         data = raw.encode("utf-8", errors="replace")
-        if not data:
+        source_available = source_path.is_file()
+        if not data and not source_available:
             return {"path": "", "sha256": "", "size": 0}
 
         tool = self._safe_name(run.get("tool", "tool"), "tool")
@@ -405,11 +421,24 @@ class PersistenceStore:
         out_dir = self.artifact_root / self._safe_name(scan_id, "scan") / agent
         out_dir.mkdir(parents=True, exist_ok=True)
         path = out_dir / name
-        path.write_bytes(data)
+        if source_available:
+            shutil.copyfile(source_path, path)
+            try:
+                source_path.unlink()
+            except OSError:
+                pass
+        else:
+            path.write_bytes(data)
+        digest = hashlib.sha256()
+        size = 0
+        with path.open("rb") as handle:
+            while chunk := handle.read(1024 * 1024):
+                digest.update(chunk)
+                size += len(chunk)
         return {
             "path": str(path),
-            "sha256": hashlib.sha256(data).hexdigest(),
-            "size": len(data),
+            "sha256": digest.hexdigest(),
+            "size": size,
         }
 
     def upsert_scan(self, scan_id: str, data: dict[str, Any]) -> None:
@@ -1246,19 +1275,32 @@ class PersistenceStore:
                 )
 
     def append_appsec_run(self, assessment_id: str, lane: str, run: dict[str, Any]) -> None:
+        now = _utc_now()
+        artifact_run = dict(run) | {"phase": lane}
+        stdout_artifact = self._write_tool_artifact(
+            assessment_id, "appsec", artifact_run, "stdout", str(run.get("stdout", "") or ""), now,
+        )
+        stderr_artifact = self._write_tool_artifact(
+            assessment_id, "appsec", artifact_run, "stderr", str(run.get("stderr", "") or ""), now,
+        )
         with self._lock, self._connect() as conn:
             conn.execute(
                 """
                 INSERT INTO appsec_tool_runs (
                     assessment_id, lane, tool, success, exit_code, duration,
-                    timed_out, stderr_snippet, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    timed_out, stderr_snippet, stdout_artifact_path,
+                    stderr_artifact_path, stdout_sha256, stderr_sha256,
+                    stdout_size, stderr_size, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     assessment_id, lane, run.get("tool", ""),
                     1 if run.get("success") else 0, int(run.get("exit_code", -1) or 0),
                     float(run.get("duration", 0) or 0), 1 if run.get("timed_out") else 0,
-                    str(run.get("stderr", ""))[-2000:], _utc_now(),
+                    str(run.get("stderr", ""))[-2000:],
+                    stdout_artifact["path"], stderr_artifact["path"],
+                    stdout_artifact["sha256"], stderr_artifact["sha256"],
+                    stdout_artifact["size"], stderr_artifact["size"], now,
                 ),
             )
 

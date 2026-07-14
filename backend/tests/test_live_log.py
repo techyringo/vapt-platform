@@ -1,3 +1,6 @@
+import pytest
+
+import core.live_log as live_log
 from core.live_log import classify_tool_log_level, prepare_tool_log_line, redact_tool_log_line
 
 
@@ -51,3 +54,34 @@ def test_structured_scanner_fragments_and_response_bodies_are_not_streamed() -> 
     assert prepare_tool_log_line('"results": [', "semgrep") == ""
     assert prepare_tool_log_line("<html>" + ("x" * 900), "nuclei") == ""
     assert prepare_tool_log_line("Scanning 42 files", "semgrep") == "Scanning 42 files"
+
+
+@pytest.mark.asyncio
+async def test_summary_mode_keeps_raw_discovery_out_of_sse(monkeypatch) -> None:
+    published: list[str] = []
+
+    class Publisher:
+        async def publish(self, _channel: str, payload: str) -> None:
+            published.append(payload)
+
+    async def publisher():
+        return Publisher()
+
+    monkeypatch.setenv("VAPT_TOOL_LOG_MODE", "summary")
+    monkeypatch.setattr(live_log, "_get_publisher", publisher)
+    monkeypatch.setattr(live_log, "_mirror_tool_log", lambda _msg: None)
+
+    await live_log.publish_tool_log(
+        "discovered GET https://example.test/one",
+        scan_id="scan", tool="katana", stream="stdout",
+    )
+    await live_log.publish_tool_log(
+        "$ katana -u https://example.test",
+        scan_id="scan", tool="katana", stream="meta",
+    )
+    await live_log.publish_tool_log(
+        "request timed out; retrying",
+        scan_id="scan", tool="katana", stream="stderr",
+    )
+
+    assert len(published) == 2

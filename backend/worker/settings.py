@@ -34,6 +34,22 @@ ARQ_QUEUE_NAME = os.environ.get("VAPT_ARQ_QUEUE", "vapt:tools")
 ARQ_HEALTH_KEY = os.environ.get("VAPT_ARQ_HEALTH_KEY", f"{ARQ_QUEUE_NAME}:health")
 
 
+def _effective_max_jobs() -> tuple[int, int, int]:
+    """Return requested, safety ceiling and effective scanner concurrency.
+
+    A stale local .env previously overrode the compose default and silently put
+    the worker back at three memory-heavy scanners. The hard ceiling makes the
+    safe laptop profile deterministic. A deliberately sized runner can raise
+    both values explicitly.
+    """
+    requested = max(1, int(os.environ.get("WORKER_MAX_JOBS", "2")))
+    hard_limit = max(1, int(os.environ.get("WORKER_MAX_JOBS_HARD_LIMIT", "2")))
+    return requested, hard_limit, min(requested, hard_limit)
+
+
+_REQUESTED_MAX_JOBS, _MAX_JOBS_HARD_LIMIT, _MAX_JOBS = _effective_max_jobs()
+
+
 def _hardened_redis_settings() -> RedisSettings:
     """RedisSettings with bounded retries + timeout so a transient Redis blip
     reconnects instead of killing the worker with ConnectionResetError (Errno
@@ -93,7 +109,15 @@ async def startup(ctx: dict) -> None:
     else:
         logger.warning("[worker:startup] Docker unavailable — tools will run directly if installed")
 
-    logger.info("[worker:startup] Worker ready (max_jobs={max})", max=os.environ.get("WORKER_MAX_JOBS", "3"))
+    if _REQUESTED_MAX_JOBS > _MAX_JOBS:
+        logger.warning(
+            "[worker:startup] Requested max_jobs={requested} capped at {effective} "
+            "by WORKER_MAX_JOBS_HARD_LIMIT={limit}",
+            requested=_REQUESTED_MAX_JOBS,
+            effective=_MAX_JOBS,
+            limit=_MAX_JOBS_HARD_LIMIT,
+        )
+    logger.info("[worker:startup] Worker ready (max_jobs={max})", max=_MAX_JOBS)
 
 
 async def shutdown(ctx: dict) -> None:
@@ -112,7 +136,7 @@ class WorkerSettings:
     # Scanner jobs are not ordinary HTTP tasks: each may own a browser, JVM,
     # nuclei process or large crawler result. Fifteen jobs per worker caused
     # queue connection resets and host pressure on the reference laptop.
-    max_jobs = max(1, int(os.environ.get("WORKER_MAX_JOBS", "3")))
+    max_jobs = _MAX_JOBS
 
     # Max seconds a single job can run before ARQ forcibly cancels it.
     job_timeout = 1800  # 30 min

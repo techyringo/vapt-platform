@@ -1932,12 +1932,15 @@ th {{ background: #eef3f8; }}
         scan_failed, ping.
         """
         mgr = get_manager(app)
-        last_event_id = request.headers.get("last-event-id", "0")
+        last_event_id = request.headers.get("last-event-id") or request.query_params.get("after_sequence", "0")
+        channel = request.query_params.get("channel", "control")
+        if channel not in {"all", "control", "telemetry"}:
+            channel = "control"
         try:
             after_sequence = max(0, int(last_event_id or 0))
         except ValueError:
             after_sequence = 0
-        queue = mgr.subscribe_events(after_sequence=after_sequence)
+        queue = mgr.subscribe_events(after_sequence=after_sequence, channel=channel)
 
         async def event_generator():
             try:

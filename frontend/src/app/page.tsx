@@ -5,7 +5,6 @@ import type React from 'react';
 import {
   Activity,
   Bot,
-  Boxes,
   Bug,
   CheckCircle2,
   ChevronRight,
@@ -19,7 +18,6 @@ import {
   Radar,
   RefreshCw,
   ScanSearch,
-  Server,
   Shield,
   ShieldAlert,
   ShieldCheck,
@@ -49,20 +47,23 @@ import { useTheme } from '@/context/ThemeContext';
 import { MetricCard } from '@/components/ui/MetricCard';
 import { ReportModal } from '@/components/ui/ReportModal';
 import { ToastContainer } from '@/components/ui/Toast';
-import { SkeletonDashboard, SkeletonAgentCard, SkeletonFindingCard } from '@/components/ui/Skeleton';
+import { SkeletonDashboard } from '@/components/ui/Skeleton';
 
 // Feature components
 import { SeverityDonut, SEV_HEX } from '@/components/features/SeverityDonut';
-import { FindingCard, SEV_BADGE_CLASS } from '@/components/features/FindingCard';
-import { AgentCard } from '@/components/features/AgentCard';
-import { LiveFeed, type LogMessage } from '@/components/features/LiveFeed';
+import { SEV_BADGE_CLASS } from '@/components/features/FindingCard';
+import { LiveTelemetry } from '@/components/features/LiveTelemetry';
 import { LLMConfigPanel } from '@/components/features/LLMConfigPanel';
 import { AppSecWorkspace } from '@/components/features/AppSecWorkspace';
 import { DastWorkspace, LiveScanWorkspace, ReconIntelWorkspace } from '@/components/features/AssessmentWorkspaces';
+import { WorkspaceErrorBoundary } from '@/components/ui/WorkspaceErrorBoundary';
+import { FindingsWorkspace } from '@/components/workspaces/FindingsWorkspace';
+import { TestCoverageWorkspace } from '@/components/workspaces/TestCoverageWorkspace';
+import { OperationsWorkspace } from '@/components/workspaces/OperationsWorkspace';
+import { AttackSurfaceWorkspace } from '@/components/workspaces/AttackSurfaceWorkspace';
 
 /* ─── Types ─────────────────────────────────────────────── */
 type SeverityFilter = SeverityKey | 'all';
-const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
 
 /* ─── Constants ──────────────────────────────────────────── */
 const FALLBACK_MODES: ScanMode[] = [
@@ -98,19 +99,6 @@ function formatPhase(phase?: string) {
   return (phase || 'standby').replace(/_/g, ' ');
 }
 
-function formatExecutedCapabilities(items: Array<{ tool: string; outcome: string }>) {
-  const grouped = new Map<string, { count: number; outcomes: Set<string> }>();
-  items.forEach(item => {
-    const current = grouped.get(item.tool) || { count: 0, outcomes: new Set<string>() };
-    current.count += 1;
-    current.outcomes.add(item.outcome.replaceAll('_', ' '));
-    grouped.set(item.tool, current);
-  });
-  return [...grouped.entries()].map(([tool, value]) =>
-    `${tool}${value.count > 1 ? ` ×${value.count}` : ''}: ${[...value.outcomes].join('/')}`,
-  ).join(' · ');
-}
-
 function scanTime(scan: Scan) {
   const parsed = parseBackendTime(scan.start_time);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -142,29 +130,12 @@ function statusBadgeClass(status?: string) {
   return 'badge-idle';
 }
 
-function severityLabel(sev: SeverityFilter) {
-  if (sev === 'all') return 'All';
-  return sev === 'informational' ? 'Info' : sev.charAt(0).toUpperCase() + sev.slice(1);
-}
-
 function riskPosture(counts: Record<SeverityKey, number>) {
   const score = Math.min(100, counts.critical * 24 + counts.high * 13 + counts.medium * 6 + counts.low * 2 + counts.informational);
   if (score >= 70) return { score, label: 'Critical exposure', color: '#f43f5e' };
   if (score >= 38) return { score, label: 'High risk',         color: '#f97316' };
   if (score > 0)   return { score, label: 'Moderate risk',     color: '#22d3ee' };
   return              { score, label: 'No exposure',            color: '#22c55e' };
-}
-
-function formatAge(value?: string) {
-  if (!value) return 'not started';
-  const ms = Date.now() - parseBackendTime(value);
-  if (!Number.isFinite(ms) || ms < 0) return 'just now';
-  const min = Math.floor(ms / 60000);
-  if (min < 1)  return 'just now';
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24)  return `${hr}h ago`;
-  return `${Math.floor(hr / 24)}d ago`;
 }
 
 function formatElapsed(scan: Scan, now: number) {
@@ -178,48 +149,6 @@ function formatElapsed(scan: Scan, now: number) {
   return hours > 0
     ? `${hours}h ${String(minutes).padStart(2, '0')}m ${String(remainder).padStart(2, '0')}s`
     : `${minutes}m ${String(remainder).padStart(2, '0')}s`;
-}
-
-function eventLog(event: SSEEvent): LogMessage | null {
-  const time = event.timestamp ? new Date(event.timestamp).toLocaleTimeString() : new Date().toLocaleTimeString();
-  if (event.type === 'ping') return null;
-  if (event.type === 'finding') {
-    return { msg: `${event.title || 'new issue'} on ${event.target_host || event.scan_id || 'target'}`, level: event.severity || 'info', time, source: 'finding', eventType: event.type };
-  }
-  if (event.type === 'agent_status') {
-    const key    = event.agent_type || event.data?.agent_type || 'agent';
-    const status = event.status     || event.data?.status     || 'updated';
-    const count  = event.findings_count || event.data?.findings_count;
-    return { msg: `${status}${count ? ` (${count} findings)` : ''}`, level: status === 'failed' ? 'error' : status === 'completed' ? 'success' : 'info', time, source: key, eventType: event.type };
-  }
-  if (event.type === 'log') {
-    return { msg: event.message || event.data?.message || '', level: event.level || event.data?.level || 'info', time, source: event.agent || event.data?.agent || 'platform', phase: event.phase || event.data?.phase, eventType: event.type };
-  }
-  if (event.type === 'tool_log') {
-    const tool = event.tool || event.data?.tool || 'tool';
-    const line = event.line || event.data?.line || '';
-    if (!line) return null;
-    const stream = event.stream || event.data?.stream || 'stdout';
-    const level = event.level || event.data?.level || 'info';
-    return { msg: line, level, time, source: tool, phase: event.phase || event.data?.phase, stream, eventType: event.type };
-  }
-  if (event.type === 'phase_change') {
-    const phase = event.phase || event.data?.phase;
-    return phase ? { msg: `Started ${formatPhase(phase)}`, level: 'info', time, source: 'orchestrator', phase, eventType: event.type } : null;
-  }
-  if (event.type === 'phase_complete' || event.type === 'surface_update') {
-    const health = event.target_health?.status;
-    const suffix = health ? ` · target ${health}` : '';
-    return { msg: `${event.message || `${formatPhase(event.phase)} evidence persisted`}${suffix}`, level: health === 'unreachable' ? 'warn' : 'success', time };
-  }
-  if (event.type === 'scan_started') {
-    const target = Array.isArray(event.targets) ? event.targets.join(', ') : event.scan_id;
-    return { msg: `Scan started: ${target}`, level: 'success', time };
-  }
-  if (event.type === 'scan_deleted') return { msg: `Scan deleted: ${event.scan_id}`, level: 'warn', time };
-  if (event.type === 'scan_complete') return { msg: 'Scan completed successfully', level: 'success', time };
-  if (event.type === 'scan_failed')   return { msg: `Scan failed: ${event.error || 'unknown error'}`, level: 'error', time };
-  return null;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -246,7 +175,6 @@ export default function Dashboard() {
   const [clockNow,       setClockNow]       = useState(() => Date.now());
 
   /* UI state */
-  const [logMessages,       setLogMessages]       = useState<LogMessage[]>([]);
   const [activeTab,         setActiveTab]         = useState<WorkspaceTab>('dashboard');
   const [severityFilter,    setSeverityFilter]    = useState<SeverityFilter>('all');
   const [showQuarantined,   setShowQuarantined]   = useState(false);
@@ -295,7 +223,7 @@ export default function Dashboard() {
      Handles BOTH SSE and polling paths.
      - Deduplicates by composite key so the same event never appears twice.
      - Updates findings state when the event belongs to the viewed scan.
-     - Updates logMessages for all event types.
+     - Operational telemetry is owned by LiveTelemetry, outside this render tree.
   ─────────────────────────────────────────────────────────────── */
   const absorbEvent = useCallback((event: SSEEvent) => {
     const key = [
@@ -309,9 +237,6 @@ export default function Dashboard() {
     if (seenEventsRef.current.size > 1500) {
       seenEventsRef.current = new Set(Array.from(seenEventsRef.current).slice(-1000));
     }
-
-    const log = eventLog(event);
-    if (log?.msg) setLogMessages(prev => [...prev.slice(-299), log]);
 
     // Update findings when the event belongs to the currently-viewed scan.
     // This makes the polling path (/api/events) a functional fallback for SSE.
@@ -351,10 +276,8 @@ export default function Dashboard() {
     }
     if (event.type === 'log') { absorbEvent(event); return; }
     if (event.type === 'tool_log') {
-      // Ephemeral live output — delivered once via SSE, bypass the dedup key
-      // (which would collapse lines sharing a timestamp).
-      const log = eventLog(event);
-      if (log?.msg) setLogMessages(prev => [...prev.slice(-299), log]);
+      // The control stream excludes these server-side. This guard keeps raw
+      // scanner lines out of the monolithic workspace if an older API sends one.
       return;
     }
     if (event.type === 'phase_change') {
@@ -415,7 +338,7 @@ export default function Dashboard() {
     }
   }, [absorbEvent]);
 
-  const { connected } = useSSE(handleEvent);
+  const { connected } = useSSE(handleEvent, { channel: 'control' });
 
   /* ─── Data loading ─── */
   const refreshAll = useCallback(async () => {
@@ -565,7 +488,6 @@ export default function Dashboard() {
       setSelectedScanId(result.scan_id);
       setFindings([]);
       setAgentStatus({});
-      setLogMessages([{ msg: `Scan queued for ${targets.join(', ')}`, level: 'success', time: new Date().toLocaleTimeString() }]);
       setTargetInput('');
       setOutOfScopeInput('');
       setScanName('');
@@ -575,7 +497,6 @@ export default function Dashboard() {
       await refreshAll();
     } catch (e: any) {
       toast.error('Failed to start scan', e.message);
-      setLogMessages(prev => [...prev.slice(-199), { msg: `Failed to start: ${e.message}`, level: 'error', time: new Date().toLocaleTimeString() }]);
     } finally {
       setStarting(false);
     }
@@ -769,13 +690,6 @@ export default function Dashboard() {
 
   const currentPhaseIndex = selectedScan ? PHASE_ORDER.findIndex(p => p === selectedScan.current_phase) : -1;
 
-  const visibleLogs: LogMessage[] = logMessages.length ? logMessages : [
-    { msg: connected ? 'SSE stream connected — awaiting events' : 'SSE stream connecting…',  level: connected ? 'success' : 'warn',  time: '—' },
-    { msg: apiHealthy ? 'Backend API healthy' : apiHealthy === false ? 'Backend API unreachable — offline mode' : 'Checking backend API…', level: apiHealthy ? 'success' : apiHealthy === false ? 'error' : 'info', time: '—' },
-    { msg: `${activeModes.length} scan mode(s) loaded`,                                      level: 'info',                           time: '—' },
-    { msg: dockerReady ? 'Docker isolation layer ready' : 'Docker daemon not confirmed',     level: dockerReady ? 'success' : 'warn', time: '—' },
-  ];
-
   /* ─── Render ────────────────────────────────────────────── */
   /* Global ⌘K / Ctrl+K to toggle the command palette */
   useEffect(() => {
@@ -873,6 +787,8 @@ export default function Dashboard() {
               </button>
             </div>
           )}
+
+          <WorkspaceErrorBoundary workspace={activeTab}>
 
           {/* ── DASHBOARD TAB ─────────────────────────────── */}
           {activeTab === 'dashboard' && (
@@ -1195,549 +1111,70 @@ export default function Dashboard() {
             )
           )}
 
-          {/* ── FINDINGS TAB ──────────────────────────────── */}
           {activeTab === 'findings' && (
-            <section>
-              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <ShieldAlert size={20} style={{ color: 'var(--accent)', flexShrink: 0 }} aria-hidden="true" />
-                  <div>
-                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Findings</h2>
-                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {filteredFindings.length} of {findings.length} findings
-                    </p>
-                  </div>
-                </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button onClick={handleRefresh} disabled={refreshing} className="btn btn-secondary">
-                    <RefreshCw size={14} className={refreshing ? 'animate-spin' : ''} aria-hidden="true" />
-                    Refresh
-                  </button>
-                  {selectedScan && (
-                    <button onClick={() => setShowReportModal(true)} disabled={selectedScan.status !== 'completed'} title={selectedScan.status === 'completed' ? 'Download final report' : 'Available after all scan phases complete'} className="btn btn-secondary">
-                      <FileText size={14} aria-hidden="true" />Report
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* Severity filter bar */}
-              <div className="sev-filter-bar" style={{ marginBottom: 14 }} role="group" aria-label="Filter by severity">
-                {SEVERITY_FILTERS.map(f => {
-                  const count = f === 'all' ? findings.length : severityCounts[f as SeverityKey];
-                  return (
-                    <button
-                      key={f}
-                      onClick={() => setSeverityFilter(f)}
-                      className={`sev-filter-btn${severityFilter === f ? ' active' : ''}`}
-                      aria-pressed={severityFilter === f}
-                    >
-                      {f !== 'all' && (
-                        <span style={{ width: 6, height: 6, borderRadius: '50%', background: SEV_DOT_COLOR[f] || '#06b6d4', display: 'inline-block', flexShrink: 0 }} aria-hidden="true" />
-                      )}
-                      {severityLabel(f)}
-                      <span className="sev-filter-count">{count}</span>
-                    </button>
-                  );
-                })}
-                {quarantinedCount > 0 && (
-                  <button
-                    onClick={() => setShowQuarantined(v => !v)}
-                    className={`sev-filter-btn${showQuarantined ? ' active' : ''}`}
-                    aria-pressed={showQuarantined}
-                    title="Low-evidence findings excluded from reports"
-                    style={{ marginLeft: 'auto' }}
-                  >
-                    {showQuarantined ? 'Hiding' : 'Show'} quarantined
-                    <span className="sev-filter-count">{quarantinedCount}</span>
-                  </button>
-                )}
-              </div>
-
-              {/* Finding list */}
-              {loadingFindings ? (
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {Array.from({ length: 5 }).map((_, i) => <SkeletonFindingCard key={i} />)}
-                </div>
-              ) : findings.length === 0 ? (
-                apiHealthy === false ? (
-                  <StateView variant="error" title="Couldn’t load findings" body="The backend is unreachable. Findings will appear once the connection is restored." onRetry={handleRefresh} />
-                ) : (
-                  <StateView variant="empty" icon={ShieldCheck} title="No findings loaded" body="Select a completed scan, or launch one — findings surface here in real time." />
-                )
-              ) : filteredFindings.length === 0 ? (
-                <StateView
-                  variant="no-results"
-                  title="No matching findings"
-                  body={`Nothing matches the "${severityLabel(severityFilter)}" filter${showQuarantined ? '' : ' — quarantined findings are hidden.'}`}
-                  action={<button className="btn btn-secondary" onClick={() => { setSeverityFilter('all'); setShowQuarantined(true); }}>Clear filters</button>}
-                />
-              ) : (
-                <div style={{ display: 'grid', gap: 8 }}>
-                  {filteredFindings.map((f, i) => {
-                    const key      = `${f.title}|${f.target_host}|${f.created_at || i}`;
-                    const expanded = expandedFindings.has(key);
-                    return (
-                      <FindingCard
-                        key={key}
-                        finding={f}
-                        expanded={expanded}
-                        onToggle={() => toggleFinding(key)}
-                      />
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+            <FindingsWorkspace
+              findings={findings}
+              filteredFindings={filteredFindings}
+              severityCounts={severityCounts}
+              severityFilter={severityFilter}
+              onSeverityFilter={setSeverityFilter}
+              showQuarantined={showQuarantined}
+              onShowQuarantined={setShowQuarantined}
+              quarantinedCount={quarantinedCount}
+              expandedFindings={expandedFindings}
+              onToggleFinding={toggleFinding}
+              loading={loadingFindings}
+              apiHealthy={apiHealthy}
+              selectedScan={selectedScan}
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              onReport={() => setShowReportModal(true)}
+            />
           )}
 
           {/* ── ATTACK PATHS TAB ──────────────────────────── */}
           {activeTab === 'agents' && (
-            <section>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, marginBottom: 20 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-                  <Bot size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
-                  <div>
-                    <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Attack Paths & Decisions</h2>
-                    <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                      {attackChains?.summary.verified || 0} verified paths · {decisions.length} recorded decisions
-                    </p>
-                  </div>
-                </div>
-                {agentEntries.length > 0 && (
-                  <span style={{
-                    fontFamily: 'var(--font-jetbrains), monospace', fontSize: 11,
-                    padding: '4px 10px', borderRadius: 6,
-                    border: '1px solid var(--accent-border)',
-                    background: 'var(--accent-dim)',
-                    color: 'var(--accent)',
-                  }}>
-                    {agentProgress}% complete
-                  </span>
-                )}
-              </div>
-
-              {!selectedScan ? (
-                <StateView variant="empty" icon={Bot} title="No assessment selected" body="Select an assessment to inspect its evidence paths and policy-bound decisions." />
-              ) : loadingInitial ? (
-                <div className="agents-grid">
-                  {Array.from({ length: 6 }).map((_, i) => <SkeletonAgentCard key={i} />)}
-                </div>
-              ) : (
-                <div style={{ display: 'grid', gap: 16 }}>
-                    <div className="card-glass" style={{ padding: 14 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
-                        <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Technology & Attack Surface Map</h3>
-                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            Persisted assets and observed relationships · no inferred decorative nodes
-                          </p>
-                        </div>
-                        <span className="badge badge-informational">{assetGraph?.raw_observations || 0} observations → {assetGraph?.total_assets || 0} canonical assets · {assetGraph?.total_edges || 0} relations</span>
-                      </div>
-                      {mappedSurfaceAssets.length === 0 ? (
-                        <div className="quiet-empty">The map appears after body-verified discovery evidence is persisted.</div>
-                      ) : (
-                        <div className="surface-map">
-                          <div className="surface-map-nodes">
-                            {mappedSurfaceAssets.map(asset => (
-                              <div className={`surface-node surface-node-${asset.asset_type}`} key={asset.asset_key}>
-                                <span>{asset.asset_type.replaceAll('_', ' ')}</span>
-                                <strong title={asset.value}>{asset.value}</strong>
-                                <small>{asset.source} · {asset.confidence}</small>
-                              </div>
-                            ))}
-                          </div>
-                          <div className="surface-map-edges">
-                            {(assetGraph?.edges || []).slice(0, 12).map(edge => (
-                              <div key={edge.edge_key}>
-                                <code title={edge.source_key}>{assetLabelByKey.get(edge.source_key) || edge.source_key}</code>
-                                <span>{edge.relation.replaceAll('_', ' ')} →</span>
-                                <code title={edge.target_key}>{assetLabelByKey.get(edge.target_key) || edge.target_key}</code>
-                              </div>
-                            ))}
-                            {!assetGraph?.edges?.length && <div className="quiet-empty">Assets are real; relationship evidence has not been captured yet.</div>}
-                          </div>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="card-glass" style={{ padding: 14 }}>
-                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
-                        <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Adaptive Decision Ledger</h3>
-                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            Approved recommendations paired with observed execution outcomes
-                          </p>
-                        </div>
-                        <span className="badge badge-informational">{decisions.length} entr{decisions.length === 1 ? 'y' : 'ies'}</span>
-                      </div>
-                      {decisions.length === 0 ? (
-                        <div className="quiet-empty">Policy decisions appear as evidence becomes available; only the approved capability set can enter the execution queue.</div>
-                      ) : (
-                        <div className="coverage-list">
-                          {[...decisions].reverse().slice(0, 6).map(decision => (
-                            <div key={decision.decision_id} className="coverage-row">
-                              <div style={{ minWidth: 0 }}>
-                                <div className="coverage-title">
-                                  {formatPhase(decision.phase)} · {decision.decision_type === 'execution_outcome' ? 'observed outcome' : 'approved plan'}
-                                </div>
-                                <div className="coverage-meta">
-                                  {decision.decision_type === 'execution_outcome'
-                                    ? formatExecutedCapabilities(decision.executed_capabilities || []) || 'No tool artifact captured'
-                                    : (decision.selected || []).map(item => item.capability).join(', ') || 'No eligible capability'}
-                                </div>
-                              </div>
-                              <span className={`badge ${decision.status === 'completed' ? 'badge-completed' : decision.status === 'failed' ? 'badge-failed' : 'badge-informational'}`}>
-                                {decision.status}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {decisions.length > 0 && (
-                        <div className="quiet-empty" style={{ marginTop: 10 }}>
-                          Policy owns execution. AI ranks only eligible actions; the selected allowlist and every real outcome are written back here.
-                        </div>
-                      )}
-                    </div>
-
-                    {attackChains && (
-                      <div className="card-glass" style={{ padding: 14 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
-                          <div>
-                            <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Evidence-backed Attack Paths</h3>
-                            <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                              {attackChains.summary.verified} verified · {attackChains.summary.hypotheses} hypotheses
-                            </p>
-                          </div>
-                          <span className={`badge ${attackChains.summary.verified ? 'badge-failed' : 'badge-idle'}`}>
-                            {attackChains.summary.total} path{attackChains.summary.total === 1 ? '' : 's'}
-                          </span>
-                        </div>
-                        {attackChains.chains.length === 0 ? (
-                          <div className="quiet-empty">No compatible evidence chain has been established.</div>
-                        ) : (
-                          <div className="coverage-list">
-                            {attackChains.chains.slice(0, 8).map(chain => (
-                              <div key={chain.chain_id} className="coverage-row">
-                                <div style={{ minWidth: 0 }}>
-                                  <div className="coverage-title">{chain.name}</div>
-                                  <div className="coverage-meta">
-                                    {chain.nodes.map(node => node.title).join(' → ')}
-                                  </div>
-                                </div>
-                                <span className={`badge ${chain.status === 'verified' ? 'badge-failed' : 'badge-running'}`}>
-                                  {chain.status}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-                    )}
-
-                    <details className="card-glass" style={{ padding: 14 }}>
-                      <summary style={{ cursor: 'pointer', color: 'var(--text-primary)', fontSize: 13, fontWeight: 700 }}>
-                        Execution stages · {agentEntries.length || 0} · {agentProgress}% complete
-                      </summary>
-                      <p style={{ margin: '7px 0 12px', fontSize: 11, color: 'var(--text-secondary)' }}>
-                        Internal workflow health is shown for troubleshooting; findings and evidence remain the customer record.
-                      </p>
-                      {agentEntries.length === 0 ? (
-                        <div className="quiet-empty">Execution stages appear when the assessment is dispatched.</div>
-                      ) : (
-                        <div className="agents-grid">
-                          {agentEntries.map(([name, status], index) => (
-                            <AgentCard key={name} name={name} status={status} index={index} />
-                          ))}
-                        </div>
-                      )}
-                    </details>
-
-	                  {coverage && (
-	                    <div className="card-glass" style={{ padding: 14 }}>
-	                      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
-	                        <div>
-                          <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Assessment Completeness</h3>
-	                          <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                            {coverage.summary.completed}/{coverage.summary.total} complete · {coverage.summary.partial || 0} partial · {coverage.summary.running || 0} running · {coverage.summary.blind_spots || 0} limitations
-	                          </p>
-	                        </div>
-	                        <span className={`badge ${(coverage.summary.blind_spots || 0) ? 'badge-failed' : 'badge-completed'}`}>
-	                          {(coverage.summary.blind_spots || 0) ? 'attention' : 'covered'}
-	                        </span>
-	                      </div>
-	                      <div className="coverage-list">
-	                        {coverage.checks.slice(0, 9).map(check => (
-	                          <div key={check.id} className="coverage-row">
-	                            <div style={{ minWidth: 0 }}>
-	                              <div className="coverage-title">{check.label}</div>
-	                              <div className="coverage-meta">
-	                                {check.phase} · {(check.successful_tools?.length ? check.successful_tools : check.tools_observed || check.expected_tools || []).join(', ') || 'no tool evidence'}
-	                              </div>
-	                            </div>
-	                            <span className={`badge ${check.status === 'completed' ? 'badge-completed' : check.status === 'running' || check.status === 'partial' ? 'badge-running' : 'badge-idle'}`}>
-	                              {check.status.replaceAll('_', ' ')}
-	                            </span>
-	                          </div>
-	                        ))}
-	                      </div>
-	                    </div>
-	                  )}
-
-	                  <div className="card-glass" style={{ padding: 14 }}>
-                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 12 }}>
-                      <div>
-                        <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Tool Runs</h3>
-                        <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                          {toolRuns.length} captured · {partialToolRuns.length} partial · {failedToolRuns.length} failed
-                        </p>
-                      </div>
-                      <button
-                        onClick={() => selectedScan?.scan_id && api.getToolRuns(selectedScan.scan_id).then(r => setToolRuns(r.tool_runs)).catch(() => {})}
-                        className="btn btn-secondary"
-                      >
-                        <RefreshCw size={14} aria-hidden="true" />Refresh
-                      </button>
-                    </div>
-                    {toolRuns.length === 0 ? (
-                      <div className="quiet-empty">Tool output appears after agents finish their current phase.</div>
-                    ) : (
-                      <div className="tool-run-list">
-                        {[...toolRuns].sort((a, b) => Number(a.success) - Number(b.success) || b.id - a.id).slice(0, 80).map(run => {
-                          const snippet = run.stderr_snippet || run.stdout_snippet || '';
-                          return (
-                            <div key={run.id} className={`tool-run-row${run.partial ? ' partial' : run.success ? '' : ' failed'}`}>
-	                              <div className="tool-run-head">
-	                                <span className="tool-run-name">{run.tool}</span>
-	                                <div className="tool-run-actions">
-	                                  {run.stdout_artifact_url && (
-	                                    <a className="tool-run-link" href={api.downloadToolArtifact(selectedScan.scan_id, run.id, 'stdout')} title="Download stdout">
-	                                      <Download size={12} aria-hidden="true" />stdout
-	                                    </a>
-	                                  )}
-	                                  {run.stderr_artifact_url && (
-	                                    <a className="tool-run-link" href={api.downloadToolArtifact(selectedScan.scan_id, run.id, 'stderr')} title="Download stderr">
-	                                      <Download size={12} aria-hidden="true" />stderr
-	                                    </a>
-	                                  )}
-	                                  <span className={`badge ${run.success ? 'badge-completed' : run.partial ? 'badge-running' : 'badge-failed'}`}>
-	                                    {run.success ? 'complete' : run.partial ? 'partial evidence' : run.timed_out ? 'timed out' : `exit ${run.exit_code}`}
-	                                  </span>
-	                                </div>
-	                              </div>
-	                              <div className="tool-run-meta">
-	                                {run.agent_type} · {run.phase || 'phase'} · {Math.round((run.duration || 0) * 10) / 10}s · stdout {run.stdout_size || 0}b · stderr {run.stderr_size || 0}b
-	                              </div>
-                              {run.command_preview && (
-                                <pre className="tool-run-snippet" style={{ borderColor: 'rgba(34,211,238,0.18)' }}>
-                                  {run.command_preview.slice(0, 900)}
-                                </pre>
-                              )}
-                              {snippet && <pre className="tool-run-snippet">{snippet.slice(0, 900)}</pre>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </section>
+            <AttackSurfaceWorkspace
+              selectedScan={selectedScan}
+              loadingInitial={loadingInitial}
+              agentEntries={agentEntries}
+              agentProgress={agentProgress}
+              assetGraph={assetGraph}
+              mappedSurfaceAssets={mappedSurfaceAssets}
+              assetLabelByKey={assetLabelByKey}
+              decisions={decisions}
+              attackChains={attackChains}
+              coverage={coverage}
+              toolRuns={toolRuns}
+              partialToolRuns={partialToolRuns}
+              failedToolRuns={failedToolRuns}
+              onRefreshToolRuns={() => selectedScan?.scan_id && api.getToolRuns(selectedScan.scan_id).then(result => setToolRuns(result.tool_runs)).catch(() => {})}
+            />
           )}
 
-          {/* ── OWASP TEST COVERAGE TAB ───────────────────── */}
           {activeTab === 'govern' && (
-            <section>
-              <div className="workspace-heading">
-                <div className="workspace-heading-copy">
-                  <ClipboardCheck size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
-                  <div>
-                    <h2>Security Test Coverage</h2>
-                    <p>OWASP WSTG coverage derived from persisted attack-surface, execution and proof evidence</p>
-                  </div>
-                </div>
-                {assurance && (
-                  <span className="badge badge-informational">
-                    {assurance.catalog} · {assurance.catalog_version}
-                  </span>
-                )}
-              </div>
-
-              {!selectedScan ? (
-                <StateView variant="empty" icon={ClipboardCheck} title="No assessment selected" body="Select an assessment to inspect its OWASP testing coverage." />
-              ) : !assurance ? (
-                <StateView variant="loading" title="Loading test coverage" body="Projecting persisted evidence onto OWASP WSTG domains." />
-              ) : (
-                <div className="control-evidence-stack">
-                  <div className="evidence-disclaimer" role="note">
-                    <ShieldAlert size={16} aria-hidden="true" />
-                    <div>
-                      <strong>Testing coverage—not compliance and not a pass</strong>
-                      <span>{assurance.disclaimer}</span>
-                    </div>
-                  </div>
-
-                  <div className="control-summary-grid">
-                    <MetricCard icon={ShieldCheck} label="Tested domains" value={`${assurance.summary.tested}/${assurance.summary.total}`} sub="runner artifact captured" tone="emerald" />
-                    <MetricCard icon={Target} label="Observed only" value={assurance.summary.observed} sub="surface exists; test not executed" tone="cyan" />
-                    <MetricCard icon={ShieldAlert} label="Not tested" value={assurance.summary.not_tested} sub="explicit assessment gap" tone="amber" />
-                  </div>
-
-                  <div className="card-glass assurance-console">
-                    <div className="control-ledger-head">
-                      <div>
-                        <h3>WSTG coverage heatmap</h3>
-                        <p>{selectedScan.name} · {selectedScan.targets.join(', ')} · {assurance.summary.confirmed_proofs} confirmed behavior proofs</p>
-                      </div>
-                      <span className="badge badge-idle">claim: testing coverage only</span>
-                    </div>
-                    <div className="assurance-heatmap">
-                      {assurance.categories.map(category => (
-                        <article className={`assurance-cell ${category.status}`} key={category.category_id}>
-                          <div className="assurance-cell-head"><code>{category.category_id}</code><span className={`coverage-signal ${category.status}`} /></div>
-                          <strong>{category.title}</strong>
-                          <p>{category.limitation}</p>
-                          <div className="assurance-evidence">
-                            {category.executed_tools.map(tool => <span key={tool}>{tool}</span>)}
-                            {!category.executed_tools.length && category.observed_assets.map(asset => <span key={asset}>{asset}</span>)}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                    <div className="assurance-frameworks">
-                      {assurance.frameworks.map(framework => (
-                        <a href={framework.url} target="_blank" rel="noreferrer" key={framework.name}><span>{framework.name} {framework.version}</span><small>{framework.purpose}</small></a>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              )}
-            </section>
+            <TestCoverageWorkspace selectedScan={selectedScan} assurance={assurance} />
           )}
 
-          {/* ── TOOLS TAB ─────────────────────────────────── */}
           {activeTab === 'tools' && (
-            <section>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 20 }}>
-                <Wrench size={20} style={{ color: 'var(--accent)' }} aria-hidden="true" />
-                <div>
-                  <h2 style={{ fontSize: 18, fontWeight: 700, color: 'var(--text-primary)' }}>Operations</h2>
-                  <p style={{ fontSize: 12, color: 'var(--text-secondary)', marginTop: 2 }}>
-                    Administrative health for approved local, container and API runners
-                  </p>
-                </div>
-              </div>
-
-              {/* Metric cards */}
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0,1fr))', gap: 12, marginBottom: 16 }}>
-                <MetricCard icon={Boxes}         label="Docker Ready"      value={dockerReady ? 'Ready' : 'Check'} sub={dockerInfo?.socket_available ? 'socket mounted' : 'socket missing'} tone={dockerReady ? 'emerald' : 'amber'} />
-                <MetricCard icon={Server}        label="Ready Runtimes"    value={capabilityTotals.ready} sub="loaded capability adapters" tone="cyan" />
-                <MetricCard icon={Download}      label="On demand / blocked" value={`${capabilityTotals.onDemand} / ${capabilityTotals.blocked}`} sub="approved pull · admin action" tone="amber" />
-              </div>
-
-              <div className="card-glass" style={{ padding: 14, marginBottom: 16 }}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 10 }}>
-                  <div>
-                    <h3 style={{ fontSize: 13, fontWeight: 700, color: 'var(--text-primary)' }}>Runtime Logs</h3>
-                    <p style={{ marginTop: 2, fontSize: 11, color: 'var(--text-secondary)' }}>
-                      {runtimeLogs.length} file{runtimeLogs.length === 1 ? '' : 's'} available
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => api.listLogs().then(r => setRuntimeLogs(r.files || [])).catch(() => {})}
-                    className="btn btn-secondary"
-                  >
-                    <RefreshCw size={14} aria-hidden="true" />Refresh
-                  </button>
-                </div>
-                {runtimeLogs.length === 0 ? (
-                  <div className="quiet-empty">Runtime log file appears after the rebuilt containers start.</div>
-                ) : (
-                  <div style={{ display: 'grid', gap: 8 }}>
-                    {runtimeLogs.slice(0, 6).map(file => (
-                      <div
-                        key={file.name}
-                        className="tool-row"
-                      >
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontFamily: 'var(--font-jetbrains), monospace', fontSize: 12, color: 'var(--text-primary)' }}>{file.name}</div>
-                          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 2 }}>
-                            {(file.size / 1024).toFixed(1)} KB · {formatAge(file.modified_at)}
-                          </div>
-                        </div>
-                        <div className="tool-run-actions">
-                          <a className="tool-run-link" href={api.downloadLog(file.name)} target="_blank" rel="noreferrer">
-                            <Download size={12} aria-hidden="true" />download
-                          </a>
-                          <button
-                            type="button"
-                            className="tool-run-link runtime-log-delete"
-                            onClick={() => {
-                              if (!window.confirm(`${file.name === 'vapt-runtime.log' ? 'Clear' : 'Delete'} ${file.name}?`)) return;
-                              api.deleteLog(file.name)
-                                .then(() => api.listLogs())
-                                .then(result => setRuntimeLogs(result.files || []))
-                                .then(() => toast.success('Runtime log updated', file.name))
-                                .catch((error: any) => toast.error('Could not update runtime log', error.message));
-                            }}
-                          >
-                            <Trash2 size={12} aria-hidden="true" />{file.name === 'vapt-runtime.log' ? 'clear' : 'delete'}
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* Capability coverage — implementation tools stay behind adapters. */}
-              {capabilityCoverage.length === 0 ? (
-                apiHealthy === false ? (
-                  <StateView variant="offline" title="Backend unreachable" body="Tool status will appear once the connection to the backend is restored." onRetry={handleRefresh} />
-                ) : (
-                  <StateView variant="empty" icon={Wrench} title="No tool data" body="No tools have reported status yet." />
-                )
-              ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 8 }}>
-                  {capabilityCoverage.map(([phase, group]) => {
-                    const complete = group.blocked === 0;
-                    const actionable = group.items.filter(item => item.state !== 'ready');
-                    return (
-                      <details key={phase} className="capability-group">
-                        <summary>
-                          <div style={{ minWidth: 0 }}>
-                            <div className="capability-group-title">{group.label}</div>
-                            <div className="capability-group-meta">
-                              {group.ready} ready · {group.onDemand} on demand · {group.blocked} blocked
-                            </div>
-                          </div>
-                          <span className={`badge ${complete ? 'badge-completed' : 'badge-running'}`}>
-                            {complete ? 'policy-ready' : `${group.blocked} blocked`}
-                          </span>
-                        </summary>
-                        <div className="capability-group-body">
-                          {actionable.length === 0 ? (
-                            <div className="capability-action-row">All registered adapters in this lane are ready.</div>
-                          ) : actionable.map(item => (
-                            <div key={item.name} className="capability-action-row">
-                              <div>
-                                <strong>{item.displayName}</strong>
-                                <span>{item.reason}</span>
-                              </div>
-                              <span className={`badge ${item.state === 'on_demand' ? 'badge-idle' : 'badge-running'}`}>
-                                {item.state === 'on_demand' ? 'on demand' : 'admin action'}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      </details>
-                    );
-                  })}
-                </div>
-              )}
-            </section>
+            <OperationsWorkspace
+              dockerReady={dockerReady}
+              dockerInfo={dockerInfo}
+              totals={capabilityTotals}
+              runtimeLogs={runtimeLogs}
+              coverage={capabilityCoverage}
+              apiHealthy={apiHealthy}
+              onRefreshLogs={() => api.listLogs().then(result => setRuntimeLogs(result.files || [])).catch(() => {})}
+              onDeleteLog={(file) => {
+                if (!window.confirm(`${file.name === 'vapt-runtime.log' ? 'Clear' : 'Delete'} ${file.name}?`)) return;
+                api.deleteLog(file.name)
+                  .then(() => api.listLogs())
+                  .then(result => setRuntimeLogs(result.files || []))
+                  .then(() => toast.success('Runtime log updated', file.name))
+                  .catch((error: Error) => toast.error('Could not update runtime log', error.message));
+              }}
+              onRetry={handleRefresh}
+            />
           )}
 
           {activeTab === 'live' && (
@@ -1777,13 +1214,12 @@ export default function Dashboard() {
             <LLMConfigPanel />
           )}
 
+          </WorkspaceErrorBoundary>
+
         </main>
-        <LiveFeed
-          logs={visibleLogs}
-          selectedScan={selectedScan}
-          connected={connected}
-          onClear={() => setLogMessages([])}
-        />
+        <WorkspaceErrorBoundary workspace="live telemetry">
+          <LiveTelemetry selectedScan={selectedScan} apiHealthy={apiHealthy} />
+        </WorkspaceErrorBoundary>
       </div>
     </div>
   );
