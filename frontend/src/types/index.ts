@@ -432,6 +432,9 @@ export interface AppSecAssessment {
       unchanged: number;
       resolved: number;
       has_baseline: boolean;
+      same_commit?: boolean;
+      current_commit_sha?: string;
+      baseline_commit_sha?: string;
       new_fingerprints?: string[];
       resolved_fingerprints?: string[];
     };

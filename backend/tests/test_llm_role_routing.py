@@ -4,7 +4,7 @@ import pytest
 
 from tools.llm_client import (
     LLMClient, LLMResponse, _GLOBAL_PROVIDER_COOLDOWNS, _GLOBAL_RATE_WINDOWS,
-    _bearer_token, _redact_llm_text,
+    _bearer_token, _provider_credential, _redact_llm_text,
 )
 
 
@@ -47,6 +47,13 @@ def _config():
 def test_bearer_token_accepts_raw_or_prefixed_keys():
     assert _bearer_token(" nvapi-test ") == "nvapi-test"
     assert _bearer_token("Bearer nvapi-test") == "nvapi-test"
+
+
+def test_named_environment_secret_overrides_stale_runtime_secret(monkeypatch):
+    monkeypatch.setenv("NVIDIA_API_KEY", "nvapi-rotated")
+    provider = SimpleNamespace(api_key_env="NVIDIA_API_KEY", api_key="nvapi-stale")
+
+    assert _provider_credential(provider) == "nvapi-rotated"
 
 
 def test_llm_audit_preview_redacts_credentials_and_log_lines():

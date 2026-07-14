@@ -343,6 +343,11 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "models": [],
             "selected_model_present": None,
             "error": "",
+            "credential_source": (
+                f"environment:{cfg.llm.api_key_env}"
+                if cfg.llm.api_key_env and os.environ.get(cfg.llm.api_key_env, "").strip()
+                else "settings" if getattr(cfg.llm, "api_key", "") else "none"
+            ),
         }
         try:
             from tools.llm_client import LLMClient
@@ -576,7 +581,9 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                 if not base_url:
                     out["error"] = "base_url required"
                     return out
-                auth = api_key or os.environ.get(api_key_env, "")
+                # A named deployment secret is authoritative over a stored UI
+                # secret so credential rotation in `.env` is never shadowed.
+                auth = os.environ.get(api_key_env, "").strip() or api_key
                 if not auth or ":" not in auth:
                     out["error"] = f"{api_key_env or 'api_key'} must be set as 'username:password'"
                     return out
@@ -612,7 +619,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
                     out["error"] = "base_url required"
                     return out
                 headers = {"Content-Type": "application/json"}
-                key = (api_key or os.environ.get(api_key_env, "")).strip()
+                key = os.environ.get(api_key_env, "").strip() or api_key.strip()
                 if key.lower().startswith("bearer "):
                     key = key[7:].strip()
                 if key:

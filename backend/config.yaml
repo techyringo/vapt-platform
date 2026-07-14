@@ -343,7 +343,7 @@ tools:
     cpu_limit: 1.5
     # -ct is Katana's own crawl deadline. It lets Katana flush partial JSONL
     # before the outer worker deadline instead of being killed with no result.
-    extra_args: ["-jc", "-aff", "-d", "3", "-c", "10", "-rl", "100", "-timeout", "10", "-ct", "240s"]
+    extra_args: ["-jc", "-aff", "-d", "2", "-c", "5", "-rl", "50", "-timeout", "10", "-ct", "240s"]
 
   hakrawler:
     enabled: true

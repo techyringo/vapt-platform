@@ -146,7 +146,13 @@ export function LiveFeed({ logs, selectedScan, connected, onClear }: LiveFeedPro
             aria-atomic="false"
             onWheel={event => { if (event.deltaY < 0) setAutoFollow(false); }}
           >
-            {visibleLogs.length === 0 && <div className="live-feed-empty">No persisted or streamed events match this view.</div>}
+            {visibleLogs.length === 0 && (
+              <div className="live-feed-empty">
+                {selectedScan
+                  ? `${connected ? 'Stream connected' : 'Stream reconnecting'} · no event matches this view for ${selectedScan.scan_id.slice(0, 14)}.`
+                  : 'No assessment selected. Telemetry will replay after an operation is selected.'}
+              </div>
+            )}
             {visibleLogs.map((log, index) => {
               const level = normalizedLevel(log.level);
               const source = log.source || (log.eventType === 'tool_log' ? 'tool' : 'platform');
@@ -160,7 +166,7 @@ export function LiveFeed({ logs, selectedScan, connected, onClear }: LiveFeedPro
                      <Activity size={12} />}
                   </span>
                   <span className={`log-source ${log.eventType === 'tool_log' ? 'tool' : ''}`}>{source}</span>
-                  {log.phase && <span className="log-phase">{formatPhase(log.phase)}</span>}
+                  <span className="log-phase">{formatPhase(log.phase)}</span>
                   <span className="log-message">{log.msg}</span>
                 </div>
               );

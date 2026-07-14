@@ -528,16 +528,42 @@ class ReconAgent(BaseAgent):
         return []
 
     async def _run_gau(self, domain: str) -> list[str]:
-        """Collect URLs from multiple sources using gau."""
-        result = await self._runner.run(
-            tool_name="gau",
-            args=["--subs", "--threads", "5", domain],
-            timeout=max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "180"))),
+        """Collect URLs from multiple sources using gau with one bounded retry.
+
+        GAU aggregates external archives, so a transient provider/network
+        failure is expected operationally. Retry once at lower concurrency,
+        record only the final logical outcome, and preserve any partial URL
+        evidence instead of reporting an unexplained hard failure.
+        """
+        timeout = max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "180")))
+        attempts = (
+            ["--subs", "--threads", "5", domain],
+            ["--subs", "--threads", "2", domain],
         )
+        first_error = ""
+        result = None
+        for attempt, args in enumerate(attempts, start=1):
+            result = await self._runner.run(tool_name="gau", args=args, timeout=timeout)
+            if result.stdout.strip() or result.success:
+                break
+            first_error = (result.stderr or result.timeout_reason or "no output")[-1000:]
+            if attempt < len(attempts):
+                logger.warning(
+                    "[RECON] gau attempt {attempt} produced no evidence; retrying once with lower concurrency",
+                    attempt=attempt,
+                )
+
+        if result is None:
+            return []
+        if first_error and result.stderr:
+            result.stderr = f"Initial attempt: {first_error}\nFinal attempt: {result.stderr}"[-5000:]
         self._record_tool_run(result, "recon")
         if result.stdout.strip():
-            urls = [u.strip() for u in result.stdout.strip().splitlines() if u.strip()]
-            logger.info("[RECON] gau: {count} URLs", count=len(urls))
+            urls = sorted({u.strip() for u in result.stdout.splitlines() if u.strip().startswith(("http://", "https://"))})
+            logger.info(
+                "[RECON] gau: {count} URLs ({outcome})",
+                count=len(urls), outcome=result.outcome,
+            )
             return urls
         return []
 
@@ -568,25 +594,16 @@ class ReconAgent(BaseAgent):
             f.write("\n".join(seeds))
 
         try:
+            # Recon needs canonical URLs, not response bodies. Plain silent
+            # output is stable across Katana releases and avoids the previous
+            # JSONL flag compatibility branch that visibly launched a second
+            # full crawl (reported by operators as a Katana restart).
             result = await self._runner.run(
                 tool_name="katana",
-                args=["-list", host_path, "-silent", "-jsonl"] + extra_args,
+                args=["-list", host_path, "-silent"] + extra_args,
                 timeout=tool_timeout,
             )
             self._record_tool_run(result, "recon")
-            if (
-                not result.success
-                and "flag provided but not defined" in (result.stderr or "").lower()
-            ):
-                logger.warning(
-                    "[RECON] katana JSONL flags unsupported by installed binary; retrying plain output"
-                )
-                result = await self._runner.run(
-                    tool_name="katana",
-                    args=["-list", host_path] + extra_args,
-                    timeout=tool_timeout,
-                )
-                self._record_tool_run(result, "recon")
             if result.stdout.strip():
                 urls = self._parse_katana_urls(result.stdout)
                 logger.info("[RECON] katana: {count} crawled URLs", count=len(urls))

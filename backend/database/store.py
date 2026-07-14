@@ -1287,18 +1287,30 @@ class PersistenceStore:
         repository: str,
         *,
         exclude_id: str,
+        ref: str = "",
     ) -> Optional[dict[str, Any]]:
-        """Return the newest comparable assessment for baseline/diff analysis."""
+        """Return the newest like-for-like assessment for baseline analysis."""
         with self._lock, self._connect() as conn:
-            row = conn.execute(
-                """
-                SELECT * FROM appsec_assessments
-                WHERE repository = ? AND assessment_id != ?
-                    AND status IN ('completed', 'partial')
-                ORDER BY updated_at DESC LIMIT 1
-                """,
-                (repository, exclude_id),
-            ).fetchone()
+            if ref:
+                row = conn.execute(
+                    """
+                    SELECT * FROM appsec_assessments
+                    WHERE repository = ? AND ref = ? AND assessment_id != ?
+                        AND status IN ('completed', 'partial')
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (repository, ref, exclude_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM appsec_assessments
+                    WHERE repository = ? AND assessment_id != ?
+                        AND status IN ('completed', 'partial')
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
+                    (repository, exclude_id),
+                ).fetchone()
         if not row:
             return None
         item = self._appsec_assessment_from_row(row)

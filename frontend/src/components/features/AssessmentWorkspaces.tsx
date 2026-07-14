@@ -13,9 +13,7 @@ import {
   ExternalLink,
   FileWarning,
   Fingerprint,
-  GitBranch,
   Globe2,
-  Network,
   Radar,
   ScanSearch,
   Server,
@@ -61,6 +59,20 @@ function evidenceGrade(finding: Finding) {
   if (findingIsVerified(finding)) return 'behavior verified';
   if (finding.quarantined) return 'quarantined';
   return finding.evidence_grade || 'candidate';
+}
+
+function decisionAuthority(decision?: AgentDecision) {
+  if (!decision) return { label: 'No decision recorded', detail: 'Waiting for persisted evidence and policy evaluation.', ai: 'not evaluated' };
+  const used = Boolean(decision.model_trace?.used);
+  return {
+    label: used ? 'AI ranked; policy authorised' : 'Deterministic policy decision',
+    detail: used
+      ? `${decision.model_trace.provider}/${decision.model_trace.model} ranked only policy-eligible capabilities.`
+      : decision.model_trace?.error
+        ? `AI was unavailable: ${decision.model_trace.error}`
+        : 'No model was required or available for this decision.',
+    ai: used ? 'used for ranking' : 'not used',
+  };
 }
 
 function WorkspaceHeading({ icon: Icon, eyebrow, title, description, right }: {
@@ -109,96 +121,110 @@ export function LiveScanWorkspace({
   const currentIndex = selectedScan ? PHASES.indexOf(selectedScan.current_phase) : -1;
   const verified = findings.filter(findingIsVerified);
   const candidates = findings.filter(item => !findingIsVerified(item));
-  const activeToolRuns = [...toolRuns].sort((a, b) => b.id - a.id).slice(0, 10);
+  const activeToolRuns = [...toolRuns].sort((a, b) => b.id - a.id).slice(0, 20);
+  const actions = [...(operation?.actions || [])].reverse();
+  const latestDecision = decisions[0];
+  const authority = decisionAuthority(latestDecision);
+  const attentionRuns = toolRuns.filter(run => !run.success || run.partial);
 
   return (
-    <section className="enterprise-workspace">
-      <WorkspaceHeading
-        icon={Activity}
-        eyebrow="Durable operation"
-        title="Live Scan"
-        description="Reconnectable execution state, exact runner outcomes and evidence as it is persisted. Leaving this screen does not interrupt the assessment."
-        right={selectedScan && (
-          <>
-            {selectedScan.status === 'running' && <button className="btn btn-danger" onClick={onStop}><CircleStop size={14} />Stop safely</button>}
-            <button className="btn btn-secondary" onClick={onReport} disabled={selectedScan.status !== 'completed'}><Download size={14} />Report</button>
-          </>
-        )}
-      />
-
+    <section className="enterprise-workspace operation-workspace">
       {!selectedScan ? (
         <div className="workspace-empty"><Activity size={30} /><strong>No assessment selected</strong><span>Launch or select an authorised assessment in Command Center.</span></div>
       ) : (
         <>
-          <div className="live-operation-strip">
-            <div>
-              <span className="section-label">Active context</span>
-              <h2>{selectedScan.name || selectedScan.scan_id}</h2>
-              <p>{selectedScan.targets.join(', ')} · {formatLabel(selectedScan.mode)}</p>
+          <header className="operation-command-bar">
+            <div className="operation-title-block">
+              <div className="operation-breadcrumb"><span>Operations</span><ArrowRight size={11} /><strong>{selectedScan.scan_id.slice(0, 14)}</strong></div>
+              <div className="operation-title-row">
+                <span className={`operation-state-dot ${selectedScan.status}`} aria-hidden="true" />
+                <div><h1>{selectedScan.name || selectedScan.scan_id}</h1><p>{selectedScan.targets.join(', ')} · {formatLabel(selectedScan.mode)} · authorised scope</p></div>
+              </div>
             </div>
-            <div className="live-operation-state">
-              <span className={`badge ${actionBadge(selectedScan.status)}`}>{selectedScan.status}</span>
-              <strong>{formatLabel(selectedScan.current_phase)}</strong>
-              <small>{operation ? `replay cursor ${operation.reconnect_cursor}` : 'loading durable ledger'}</small>
+            <div className="operation-command-actions">
+              <div><span>Status</span><strong className={selectedScan.status}>{selectedScan.status}</strong></div>
+              <div><span>Current phase</span><strong>{formatLabel(selectedScan.current_phase)}</strong></div>
+              <div><span>Replay cursor</span><strong>{operation?.reconnect_cursor ?? '—'}</strong></div>
+              {selectedScan.status === 'running' && <button className="btn btn-danger" onClick={onStop}><CircleStop size={14} />Stop safely</button>}
+              <button className="btn btn-secondary" onClick={onReport} disabled={selectedScan.status !== 'completed'}><Download size={14} />Evidence report</button>
             </div>
-          </div>
+          </header>
 
-          <div className="phase-track" aria-label="Assessment phases">
+          <div className="operation-phase-rail" aria-label="Assessment phases">
             {PHASES.map((phase, index) => {
               const done = selectedScan.status === 'completed' || currentIndex > index;
               const active = currentIndex === index && selectedScan.status === 'running';
               return (
-                <div key={phase} className={`phase-track-step${done ? ' done' : ''}${active ? ' active' : ''}`}>
+                <div key={phase} className={`operation-phase${done ? ' done' : ''}${active ? ' active' : ''}`}>
                   <span>{done ? <CheckCircle2 size={13} /> : index + 1}</span>
-                  <strong>{formatLabel(phase)}</strong>
+                  <div><strong>{formatLabel(phase)}</strong><small>{done ? 'complete' : active ? 'in progress' : 'pending'}</small></div>
                 </div>
               );
             })}
           </div>
 
-          <div className="workspace-metric-grid">
-            <div><Activity /><span>Durable actions</span><strong>{operation?.summary.total_actions || 0}</strong><small>{operation?.summary.running || 0} running · {operation?.summary.retrying || 0} retrying</small></div>
-            <div><ShieldCheck /><span>Verified findings</span><strong>{verified.length}</strong><small>replayable or provider proof</small></div>
-            <div><FileWarning /><span>Candidate leads</span><strong>{candidates.length}</strong><small>not report-eligible as confirmed</small></div>
-            <div><Network /><span>Observed surface</span><strong>{assetGraph?.total_assets || 0}</strong><small>{assetGraph?.total_edges || 0} persisted relations</small></div>
+          <div className="operation-summary-strip">
+            <div><span>Actions</span><strong>{operation?.summary.total_actions || 0}</strong><small>{operation?.summary.running || 0} running · {operation?.summary.retrying || 0} retrying</small></div>
+            <div><span>Runner health</span><strong className={attentionRuns.length ? 'attention' : 'healthy'}>{attentionRuns.length ? `${attentionRuns.length} attention` : 'healthy'}</strong><small>{toolRuns.length} persisted outcomes</small></div>
+            <div><span>Evidence gate</span><strong>{verified.length} verified</strong><small>{candidates.length} candidates quarantined from confirmed reports</small></div>
+            <div><span>Surface</span><strong>{assetGraph?.total_assets || 0} assets</strong><small>{assetGraph?.total_edges || 0} canonical relationships</small></div>
+            <div><span>Recovery</span><strong>{operation?.recovery.event_replay ? 'replay ready' : 'not ready'}</strong><small>{operation?.recovery.operator_resume_required ? 'operator resume required' : 'automatic reconnect'}</small></div>
           </div>
 
-          <div className="workspace-grid workspace-grid-live">
-            <div className="card-glass workspace-panel">
-              <div className="workspace-panel-head"><div><span className="section-label">Execution ledger</span><h3>Approved actions and checkpoints</h3></div><span className="truth-chip">persisted</span></div>
-              {!operation?.actions.length ? <div className="quiet-empty">Actions appear after the policy engine queues an eligible capability.</div> : (
-                <div className="action-ledger">
-                  {[...operation.actions].reverse().slice(0, 16).map(action => (
-                    <article key={action.action_id} className="action-ledger-row">
-                      <span className={`action-state action-state-${action.status}`} />
-                      <div><strong>{action.capability || action.tool}</strong><span>{formatLabel(action.phase)} · {action.runner} · attempt {action.attempt}/{action.max_attempts}</span><small>{action.reason || action.error || 'Policy-approved execution'}</small></div>
-                      <span className={`badge ${actionBadge(action.status)}`}>{formatLabel(action.status)}</span>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
+          <div className="operation-console">
+            <section className="operation-ledger-pane">
+              <div className="operation-section-head"><div><span>Execution ledger</span><h2>Policy-authorised actions</h2></div><small>Durable checkpoints · latest first</small></div>
+              <div className="operation-table-wrap">
+                <table className="operation-table">
+                  <thead><tr><th>Status</th><th>Capability</th><th>Phase</th><th>Runner</th><th>Attempt</th><th>Evidence / reason</th></tr></thead>
+                  <tbody>
+                    {!actions.length && <tr><td colSpan={6} className="operation-table-empty">No action has been queued. The current phase may still be collecting evidence for policy evaluation.</td></tr>}
+                    {actions.slice(0, 24).map(action => (
+                      <tr key={action.action_id}>
+                        <td><span className={`badge ${actionBadge(action.status)}`}>{formatLabel(action.status)}</span></td>
+                        <td><strong>{action.capability || action.tool}</strong><code>{action.action_id.slice(0, 12)}</code></td>
+                        <td>{formatLabel(action.phase)}</td>
+                        <td>{action.runner || 'unassigned'}</td>
+                        <td>{action.attempt}/{action.max_attempts}</td>
+                        <td><span className="operation-reason">{action.error || action.reason || (action.checkpoint?.evidence_captured ? 'Evidence checkpoint persisted' : 'Policy-approved execution')}</span></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
 
-            <div className="card-glass workspace-panel">
-              <div className="workspace-panel-head"><div><span className="section-label">Runner evidence</span><h3>Recent tool outcomes</h3></div><TerminalSquare size={17} /></div>
-              {!activeToolRuns.length ? <div className="quiet-empty">No tool outcomes have been persisted for this assessment.</div> : (
-                <div className="compact-run-list">
-                  {activeToolRuns.map(run => (
-                    <article key={run.id}>
-                      <div><strong>{run.tool}</strong><span>{formatLabel(run.phase)} · {Math.round(run.duration * 10) / 10}s</span></div>
-                      <span className={`badge ${run.success ? 'badge-completed' : run.partial ? 'badge-running' : 'badge-failed'}`}>{run.outcome || (run.success ? 'completed' : 'failed')}</span>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
-          </div>
+              <div className="operation-section-head operation-runs-head"><div><span>Runner outcomes</span><h2>Scanner execution evidence</h2></div><small>Raw output remains in bounded artifacts</small></div>
+              <div className="operation-table-wrap">
+                <table className="operation-table tool-outcome-table">
+                  <thead><tr><th>Outcome</th><th>Tool</th><th>Phase</th><th>Duration</th><th>Exit</th><th>Evidence</th><th>Recorded</th></tr></thead>
+                  <tbody>
+                    {!activeToolRuns.length && <tr><td colSpan={7} className="operation-table-empty">No tool outcome has been persisted for this assessment.</td></tr>}
+                    {activeToolRuns.map(run => (
+                      <tr key={run.id}>
+                        <td><span className={`badge ${run.success ? 'badge-completed' : run.partial ? 'badge-running' : 'badge-failed'}`}>{run.outcome || (run.success ? 'completed' : 'failed')}</span></td>
+                        <td><strong>{run.tool}</strong></td><td>{formatLabel(run.phase)}</td><td>{Math.round(run.duration * 10) / 10}s</td><td>{run.exit_code}</td>
+                        <td>{run.evidence_captured ? 'captured' : 'none'}{run.timed_out ? ' · timeout' : ''}</td>
+                        <td>{new Date(run.created_at).toLocaleTimeString()}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </section>
 
-          <div className="workspace-grid workspace-grid-live">
-            <div className="card-glass workspace-panel">
-              <div className="workspace-panel-head"><div><span className="section-label">Evidence stream</span><h3>Latest security observations</h3></div><span className="truth-chip">{findings.length} total</span></div>
-              {!findings.length ? <div className="quiet-empty">No security observations have passed normalization yet.</div> : (
-                <div className="evidence-stream">
+            <aside className="operation-context-pane">
+              <section className="decision-provenance">
+                <div className="operation-section-head"><div><span>Decision provenance</span><h2>Who selected the next action?</h2></div></div>
+                <div className="authority-stack">
+                  <div><span>Evidence</span><strong>{latestDecision?.input_evidence?.length || 0} tokens</strong><small>observed facts establish eligibility</small></div>
+                  <div><span>AI role</span><strong>{authority.ai}</strong><small>{authority.detail}</small></div>
+                  <div><span>Authority</span><strong>{formatLabel(latestDecision?.policy?.decision_authority || 'deterministic engagement policy')}</strong><small>scope, risk and allowlist remain deterministic</small></div>
+                  <div><span>Execution</span><strong>{latestDecision?.execution?.automatically_executed ? 'queued by policy' : 'advisory only'}</strong><small>{latestDecision?.execution?.note || 'No adaptive action has been executed from this record.'}</small></div>
+                </div>
+              </section>
+              <section className="operation-evidence-queue">
+                <div className="operation-section-head"><div><span>Evidence queue</span><h2>Latest observations</h2></div><small>{findings.length} total</small></div>
+                {!findings.length ? <div className="operation-table-empty">No normalized observation yet.</div> : <div className="evidence-stream">
                   {findings.slice(0, 10).map((finding, index) => (
                     <article key={`${finding.title}-${finding.target_url}-${index}`}>
                       <span className={`finding-state ${findingIsVerified(finding) ? 'verified' : 'candidate'}`} />
@@ -206,27 +232,13 @@ export function LiveScanWorkspace({
                       <small>{evidenceGrade(finding)}</small>
                     </article>
                   ))}
-                </div>
-              )}
-            </div>
-
-            <div className="card-glass workspace-panel">
-              <div className="workspace-panel-head"><div><span className="section-label">Adaptive decisions</span><h3>Why the plan changed</h3></div><GitBranch size={17} /></div>
-              {!decisions.length ? <div className="quiet-empty">No adaptive decision has been recorded for this assessment.</div> : (
-                <div className="decision-stream">
-                  {decisions.slice(0, 8).map(decision => (
-                    <article key={decision.decision_id}>
-                      <div><strong>{formatLabel(decision.decision_type || decision.status)}</strong><span>{formatLabel(decision.phase)} · {decision.policy?.decision_authority || 'deterministic policy'}</span></div>
-                      <p>{decision.hypotheses?.[0] || decision.selected?.[0]?.reason || decision.recovery_actions?.[0]?.action || 'Decision recorded without an explanatory summary.'}</p>
-                    </article>
-                  ))}
-                </div>
-              )}
-            </div>
+                </div>}
+              </section>
+            </aside>
           </div>
 
-          <div className="card-glass scan-selector-panel">
-            <span className="section-label">Assessment history</span>
+          <div className="operation-history">
+            <span>Recent operations</span>
             <div className="scan-selector-row">
               {scans.slice(0, 12).map(scan => (
                 <button key={scan.scan_id} onClick={() => onSelectScan(scan.scan_id)} className={scan.scan_id === selectedScan.scan_id ? 'active' : ''}>

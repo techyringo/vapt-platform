@@ -56,6 +56,18 @@ def _bearer_token(value: str) -> str:
     return token
 
 
+def _provider_credential(pc: Any) -> str:
+    """Resolve credentials without letting a stale UI secret shadow `.env`.
+
+    When an operator names ``api_key_env``, that environment variable is the
+    deployment authority. A persisted inline key remains a fallback for the
+    settings-only workflow, but it cannot silently override a newly rotated
+    Docker secret or `.env` value.
+    """
+    env_value = os.environ.get(getattr(pc, "api_key_env", ""), "").strip()
+    return env_value or str(getattr(pc, "api_key", "") or "").strip()
+
+
 def _redact_llm_text(value: str, limit: int = 4000) -> str:
     """Return a bounded, log-safe prompt/response preview."""
     text = (value or "")[:limit]
@@ -390,9 +402,9 @@ class LLMClient:
             elif pc.provider == LLMProvider.OPENAI_COMPAT and pc.base_url:
                 available.append(name)
             elif pc.provider == LLMProvider.HTTP_BASIC_CHAT and pc.base_url:
-                if pc.api_key or os.environ.get(pc.api_key_env, ""):
+                if _provider_credential(pc):
                     available.append(name)
-            elif pc.api_key or os.environ.get(pc.api_key_env, ""):
+            elif _provider_credential(pc):
                 available.append(name)
         return available
 
@@ -497,7 +509,7 @@ class LLMClient:
 
             # Check API key availability
             if pc.provider not in {LLMProvider.OLLAMA, LLMProvider.OPENAI_COMPAT}:
-                api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
+                api_key = _bearer_token(_provider_credential(pc))
                 if not api_key:
                     continue
 
@@ -711,7 +723,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="openai", model=model, error="openai package not installed")
 
-        api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
+        api_key = _bearer_token(_provider_credential(pc))
         client = AsyncOpenAI(api_key=api_key, organization=pc.organization_id or None)
 
         messages = []
@@ -750,7 +762,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="anthropic", model=model, error="httpx not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _provider_credential(pc)
         if not api_key:
             return LLMResponse(content="", provider="anthropic", model=model, error="ANTHROPIC_API_KEY not set")
 
@@ -797,7 +809,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="gemini", model=model, error="httpx not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _provider_credential(pc)
         if not api_key:
             return LLMResponse(content="", provider="gemini", model=model, error="GEMINI_API_KEY not set")
 
@@ -899,7 +911,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="azure", model=model, error="openai package not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _provider_credential(pc)
         if not api_key or not pc.base_url:
             return LLMResponse(content="", provider="azure", model=model, error="AZURE_OPENAI_API_KEY and base_url required")
 
@@ -948,7 +960,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="groq", model=model, error="httpx not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _provider_credential(pc)
         if not api_key:
             return LLMResponse(content="", provider="groq", model=model, error="GROQ_API_KEY not set")
 
@@ -998,7 +1010,7 @@ class LLMClient:
         except ImportError:
             return LLMResponse(content="", provider="together", model=model, error="httpx not installed")
 
-        api_key = pc.api_key or os.environ.get(pc.api_key_env, "")
+        api_key = _provider_credential(pc)
         if not api_key:
             return LLMResponse(content="", provider="together", model=model, error="TOGETHER_API_KEY not set")
 
@@ -1054,7 +1066,7 @@ class LLMClient:
         headers = {
             "Content-Type": "application/json",
         }
-        api_key = _bearer_token(pc.api_key or os.environ.get(pc.api_key_env, ""))
+        api_key = _bearer_token(_provider_credential(pc))
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
@@ -1122,7 +1134,7 @@ class LLMClient:
         if not pc.base_url:
             return LLMResponse(content="", provider="http_basic_chat", model=model, error="base_url required")
 
-        auth_value = pc.api_key or os.environ.get(pc.api_key_env, "")
+        auth_value = _provider_credential(pc)
         if not auth_value or ":" not in auth_value:
             return LLMResponse(
                 content="",

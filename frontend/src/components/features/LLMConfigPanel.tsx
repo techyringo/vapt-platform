@@ -278,6 +278,11 @@ export function LLMConfigPanel() {
                   NVIDIA endpoint is currently reading OPENAI_API_KEY. Re-enter the NVIDIA key above or change this to NVIDIA_API_KEY.
                 </div>
               )}
+              {ep.api_key_env && (
+                <div style={{ marginTop: 6, fontSize: 10, color: 'var(--text-muted)' }}>
+                  Credential source: environment variable <code>{ep.api_key_env}</code> when present; the stored key is fallback only. Recreate backend and worker containers after changing .env.
+                </div>
+              )}
 
               {isPrimary && (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 8, marginTop: 8 }}>

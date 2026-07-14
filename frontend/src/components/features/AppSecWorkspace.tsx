@@ -213,8 +213,15 @@ export function AppSecWorkspace() {
                 <div className="appsec-diff" aria-label="Baseline comparison">
                   <div>
                     <span className="section-label">Scan diff</span>
-                    <strong>{detail.summary.diff.has_baseline ? 'Compared with previous assessment' : 'First baseline captured'}</strong>
-                    {detail.summary.baseline_assessment_id && <small>{detail.summary.baseline_assessment_id}</small>}
+                    <strong>{detail.summary.diff.same_commit
+                      ? 'Same commit rescanned — unchanged results are expected'
+                      : detail.summary.diff.has_baseline ? 'Compared with previous assessment' : 'First baseline captured'}</strong>
+                    {detail.summary.diff.has_baseline && (
+                      <small>
+                        {detail.summary.diff.baseline_commit_sha?.slice(0, 12) || detail.summary.baseline_assessment_id}
+                        {' → '}{detail.summary.diff.current_commit_sha?.slice(0, 12) || detail.commit_sha.slice(0, 12)}
+                      </small>
+                    )}
                   </div>
                   <div><span>New</span><strong className="new">{detail.summary.diff.new}</strong></div>
                   <div><span>Unchanged</span><strong>{detail.summary.diff.unchanged}</strong></div>

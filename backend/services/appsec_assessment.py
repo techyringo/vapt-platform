@@ -373,9 +373,16 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
         store.replace_appsec_findings(assessment_id, findings)
         unavailable = [lane for lane, state in coverage.items() if state["status"] in {"unavailable", "partial"}]
         status = "partial" if unavailable else "completed"
-        baseline = store.load_previous_appsec_assessment(repository, exclude_id=assessment_id)
+        baseline = store.load_previous_appsec_assessment(repository, ref=ref, exclude_id=assessment_id)
         summary = _summary(findings, unavailable)
-        summary["diff"] = assessment_diff(findings, (baseline or {}).get("findings") or [])
+        diff = assessment_diff(findings, (baseline or {}).get("findings") or [])
+        baseline_revision = str((baseline or {}).get("commit_sha") or "")
+        diff.update({
+            "current_commit_sha": revision,
+            "baseline_commit_sha": baseline_revision,
+            "same_commit": bool(baseline_revision and baseline_revision == revision),
+        })
+        summary["diff"] = diff
         summary["baseline_assessment_id"] = (baseline or {}).get("assessment_id", "")
         store.update_appsec_assessment(assessment_id, {
             "status": status,

@@ -281,19 +281,40 @@ class ToolResult:
 
     @property
     def partial(self) -> bool:
-        """Whether a failed/expired process still produced usable evidence."""
-        return self.timed_out and bool(self.stdout.strip())
+        """Whether an abnormal process still produced usable evidence.
+
+        Several OSINT providers return a non-zero status when one upstream
+        source fails even though other providers emitted valid URLs. Treating
+        that as an empty failure discards evidence and makes a degraded
+        provider look like a scanner crash. Resource exhaustion remains its
+        own outcome, but the captured stdout is still marked as evidence.
+        """
+        output = self.stdout.strip()
+        if self.success or not output:
+            return False
+        lowered = output.lower()
+        # CLI usage/help emitted after an invalid flag is not assessment
+        # evidence. For a non-timeout failure, require a structured record or
+        # URL so arbitrary banners/errors cannot pass the evidence gate.
+        if len(output.splitlines()) <= 4 and lowered.startswith(("usage:", "help:", "unknown flag", "error: unknown")):
+            return False
+        if self.timed_out:
+            return True
+        return any(
+            line.lstrip().startswith(("http://", "https://", "{", "["))
+            for line in output.splitlines()
+        )
 
     @property
     def outcome(self) -> str:
         if self.success:
             return "completed"
+        if self.oom_killed:
+            return "resource_exhausted"
         if self.partial:
             return "partial"
         if self.timed_out:
             return "timed_out"
-        if self.oom_killed:
-            return "resource_exhausted"
         return "failed"
 
     @property
