@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import difflib
 import json
 import os
 import re
@@ -358,6 +359,63 @@ class DASTValidator:
                         cwe_ids=["CWE-89"],
                         tags=["dast-proof", "sqli", "error-based", "safe-validation"],
                     )
+
+            # Error messages are often suppressed. Use a paired true/false
+            # negative control and require a strong response
+            # relationship before creating proof. A single length change or
+            # status code is never enough to confirm SQL injection.
+            true_url = DASTPlanner.replace_param(
+                hypothesis.candidate.url,
+                hypothesis.candidate.parameter,
+                payloads[2],
+            )
+            false_url = DASTPlanner.replace_param(
+                hypothesis.candidate.url,
+                hypothesis.candidate.parameter,
+                payloads[3],
+            )
+            true_resp = await client.get(true_url)
+            false_resp = await client.get(false_url)
+            baseline_true = self._response_similarity(baseline.text or "", true_resp.text or "")
+            baseline_false = self._response_similarity(baseline.text or "", false_resp.text or "")
+            true_false = self._response_similarity(true_resp.text or "", false_resp.text or "")
+            boolean_proof = (
+                baseline.status_code == true_resp.status_code
+                and baseline_true >= 0.92
+                and baseline_false <= 0.72
+                and true_false <= 0.72
+            )
+            if boolean_proof:
+                return ValidationProof(
+                    hypothesis_id=hypothesis.id,
+                    vuln_type="sqli",
+                    validator=hypothesis.validator,
+                    url=true_url,
+                    parameter=hypothesis.candidate.parameter,
+                    confirmed=True,
+                    confidence="high",
+                    severity="high",
+                    title="SQL Injection Boolean Differential Proof",
+                    evidence=(
+                        "A paired SQL boolean control produced a response differential: "
+                        f"baseline↔true={baseline_true:.2f}, baseline↔false={baseline_false:.2f}, "
+                        f"true↔false={true_false:.2f}."
+                    ),
+                    request_proof=f"GET {true_url}\nNEGATIVE CONTROL GET {false_url}",
+                    response_proof=(
+                        f"baseline status={baseline.status_code} bytes={len(baseline.content)}\n"
+                        f"true status={true_resp.status_code} bytes={len(true_resp.content)} similarity={baseline_true:.2f}\n"
+                        f"false status={false_resp.status_code} bytes={len(false_resp.content)} similarity={baseline_false:.2f}"
+                    ),
+                    remediation="Use parameterized queries/prepared statements and avoid building SQL from user-controlled strings.",
+                    cwe_ids=["CWE-89"],
+                    tags=["dast-proof", "sqli", "boolean-differential", "negative-control", "safe-validation"],
+                    metadata={
+                        "baseline_true_similarity": baseline_true,
+                        "baseline_false_similarity": baseline_false,
+                        "true_false_similarity": true_false,
+                    },
+                )
         return None
 
     async def _validate_nosqli(self, hypothesis: DASTHypothesis) -> ValidationProof | None:
@@ -547,6 +605,17 @@ class DASTValidator:
         start = max(0, idx - radius)
         end = min(len(text), idx + len(marker) + radius)
         return text[start:end]
+
+    @staticmethod
+    def _response_similarity(left: str, right: str, limit: int = 200_000) -> float:
+        """Compare bounded, whitespace-normalized bodies for negative controls."""
+        left_normalized = " ".join((left or "")[:limit].split())
+        right_normalized = " ".join((right or "")[:limit].split())
+        if not left_normalized and not right_normalized:
+            return 1.0
+        if not left_normalized or not right_normalized:
+            return 0.0
+        return round(difflib.SequenceMatcher(None, left_normalized, right_normalized).ratio(), 4)
 
     @staticmethod
     def _decode_jwt_header(token: str) -> dict[str, Any] | None:

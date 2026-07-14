@@ -360,6 +360,7 @@ export interface AppSecCoverageLane {
   files?: number;
   source_files?: number;
   scanned_files?: number;
+  analysis_coverage_percent?: number;
   skipped_files?: number;
   scanner_errors?: number;
   duration_seconds?: number;

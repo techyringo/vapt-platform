@@ -227,7 +227,7 @@ export function AppSecWorkspace() {
                   const state = detail.coverage?.[key] || { status: 'planned', tool: key };
                   const Icon = meta.icon;
                   const profile = key === 'sast' && state.languages
-                    ? `${state.scanned_files ?? state.source_files ?? state.files ?? '?'} analyzed · ${Object.keys(state.languages).slice(0, 4).join(', ')}`
+                    ? `${state.scanned_files ?? '?'} of ${state.source_files ?? state.files ?? '?'} source files · ${state.analysis_coverage_percent ?? '?'}% reported coverage · ${Object.keys(state.languages).slice(0, 4).join(', ')}`
                     : key === 'sca' && state.manifests?.length
                       ? `${state.manifests.length} manifest${state.manifests.length === 1 ? '' : 's'}${state.sbom?.components !== undefined ? ` · ${state.sbom.components} SBOM components` : ''}`
                       : state.verification || '';

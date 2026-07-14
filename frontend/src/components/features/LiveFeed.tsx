@@ -1,13 +1,18 @@
-import { useMemo, useState } from 'react';
-import type React from 'react';
+'use client';
+
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
+  Circle,
   Pause,
   Play,
   Search,
   TerminalSquare,
+  Trash2,
   XCircle,
 } from 'lucide-react';
 import type { Scan } from '@/types';
@@ -44,15 +49,19 @@ function normalizedLevel(level: string) {
 
 interface LiveFeedProps {
   logs: LogMessage[];
-  logRef: React.RefObject<HTMLDivElement | null>;
   selectedScan?: Scan;
+  connected: boolean;
+  onClear?: () => void;
 }
 
-export function LiveFeed({ logs, logRef, selectedScan }: LiveFeedProps) {
+export function LiveFeed({ logs, selectedScan, connected, onClear }: LiveFeedProps) {
   const [filter, setFilter] = useState<FeedFilter>('all');
   const [query, setQuery] = useState('');
   const [paused, setPaused] = useState(false);
   const [pausedLogs, setPausedLogs] = useState<LogMessage[]>([]);
+  const [open, setOpen] = useState(false);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const logRef = useRef<HTMLDivElement>(null);
 
   const displayedLogs = paused ? pausedLogs : logs;
   const visibleLogs = useMemo(() => {
@@ -67,81 +76,98 @@ export function LiveFeed({ logs, logRef, selectedScan }: LiveFeedProps) {
   }, [displayedLogs, filter, query]);
 
   const issueCount = displayedLogs.filter(log => ['error', 'warn'].includes(normalizedLevel(log.level))).length;
+
+  useEffect(() => {
+    const node = logRef.current;
+    if (open && autoFollow && !paused && node) node.scrollTop = node.scrollHeight;
+  }, [autoFollow, open, paused, visibleLogs]);
+
   const togglePause = () => {
     if (!paused) setPausedLogs(logs);
     setPaused(value => !value);
   };
 
   return (
-    <div className="card-glass live-feed-card">
-      <div className="live-feed-header">
-        <div className="live-feed-title">
+    <section className={`telemetry-drawer${open ? ' open' : ''}`} aria-label="Live assessment telemetry">
+      <div className="telemetry-rail">
+        <button type="button" className="telemetry-toggle" onClick={() => setOpen(value => !value)} aria-expanded={open}>
           <TerminalSquare size={15} aria-hidden="true" />
-          <div>
-            <strong>Mission Control</strong>
-            <span>{displayedLogs.length} events · {issueCount} need attention</span>
+          <strong>Live Telemetry</strong>
+          <span>[{logs.length}]</span>
+          {open ? <ChevronDown size={14} aria-hidden="true" /> : <ChevronUp size={14} aria-hidden="true" />}
+        </button>
+        <div className={`telemetry-stream-state${connected ? ' connected' : ''}`} role="status">
+          <Circle size={8} fill="currentColor" aria-hidden="true" />
+          {connected ? 'STREAM' : 'RECONNECTING'}
+        </div>
+        {selectedScan && (
+          <span className={`badge ${statusBadgeClass(selectedScan.status)}`}>
+            {formatPhase(selectedScan.current_phase)}
+          </span>
+        )}
+        {issueCount > 0 && <span className="telemetry-issue-count">{issueCount} need attention</span>}
+        <div className="telemetry-rail-actions">
+          <button type="button" onClick={() => setAutoFollow(value => !value)} className={autoFollow ? 'active' : ''}>
+            {autoFollow ? 'AUTO' : 'HOLD'}
+          </button>
+          <button type="button" onClick={togglePause}>
+            {paused ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}
+            {paused ? 'Resume' : 'Pause'}
+          </button>
+          <button type="button" onClick={onClear} disabled={!onClear || logs.length === 0} title="Clear this browser view; persisted audit events are retained">
+            <Trash2 size={12} aria-hidden="true" />Clear view
+          </button>
+        </div>
+      </div>
+
+      {open && (
+        <div className="telemetry-body">
+          <div className="telemetry-toolbar" aria-label="Telemetry filters">
+            <div className="live-feed-filters">
+              {(['all', 'tools', 'issues'] as FeedFilter[]).map(option => (
+                <button type="button" key={option} className={filter === option ? 'active' : ''} onClick={() => setFilter(option)}>
+                  {option}
+                </button>
+              ))}
+            </div>
+            <label className="live-feed-search">
+              <Search size={12} aria-hidden="true" />
+              <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter source, phase or output" />
+            </label>
+            <span className="telemetry-retention-note">View clear does not delete audit evidence</span>
+          </div>
+
+          <div
+            ref={logRef}
+            className="terminal-feed telemetry-feed"
+            role="log"
+            aria-label="Live assessment event log"
+            aria-live={paused ? 'off' : 'polite'}
+            aria-atomic="false"
+            onWheel={event => { if (event.deltaY < 0) setAutoFollow(false); }}
+          >
+            {visibleLogs.length === 0 && <div className="live-feed-empty">No persisted or streamed events match this view.</div>}
+            {visibleLogs.map((log, index) => {
+              const level = normalizedLevel(log.level);
+              const source = log.source || (log.eventType === 'tool_log' ? 'tool' : 'platform');
+              return (
+                <div key={`${log.time}-${index}-${log.msg.slice(0, 24)}`} className={`log-line ${level}`}>
+                  <span className="log-time">{log.time}</span>
+                  <span className="log-icon" aria-hidden="true">
+                    {level === 'error' ? <XCircle size={12} /> :
+                     level === 'warn' ? <AlertTriangle size={12} /> :
+                     level === 'success' ? <CheckCircle2 size={12} /> :
+                     <Activity size={12} />}
+                  </span>
+                  <span className={`log-source ${log.eventType === 'tool_log' ? 'tool' : ''}`}>{source}</span>
+                  {log.phase && <span className="log-phase">{formatPhase(log.phase)}</span>}
+                  <span className="log-message">{log.msg}</span>
+                </div>
+              );
+            })}
           </div>
         </div>
-        <div className="live-feed-status">
-          {paused && <span className="badge badge-idle">paused</span>}
-          {selectedScan && (
-            <span className={`badge ${statusBadgeClass(selectedScan.status)}`} aria-live="polite">
-              {formatPhase(selectedScan.current_phase)}
-            </span>
-          )}
-        </div>
-      </div>
-
-      <div className="live-feed-toolbar" aria-label="Live feed controls">
-        <div className="live-feed-filters">
-          {(['all', 'tools', 'issues'] as FeedFilter[]).map(option => (
-            <button
-              type="button"
-              key={option}
-              className={filter === option ? 'active' : ''}
-              onClick={() => setFilter(option)}
-            >
-              {option}
-            </button>
-          ))}
-        </div>
-        <label className="live-feed-search">
-          <Search size={12} aria-hidden="true" />
-          <input value={query} onChange={event => setQuery(event.target.value)} placeholder="Filter source or output" />
-        </label>
-        <button type="button" className="live-feed-pause" onClick={togglePause}>
-          {paused ? <Play size={12} aria-hidden="true" /> : <Pause size={12} aria-hidden="true" />}
-          {paused ? 'Resume' : 'Pause'}
-        </button>
-      </div>
-
-      <div
-        ref={logRef}
-        className="terminal-feed"
-        role="log"
-        aria-label="Live assessment event log"
-        aria-live={paused ? 'off' : 'polite'}
-        aria-atomic="false"
-      >
-        {visibleLogs.length === 0 && <div className="live-feed-empty">No events match this view.</div>}
-        {visibleLogs.map((log, i) => {
-          const level = normalizedLevel(log.level);
-          const source = log.source || (log.eventType === 'tool_log' ? 'tool' : 'platform');
-          return (
-            <div key={`${log.time}-${i}`} className={`log-line ${level}`}>
-              <span className="log-time">{log.time}</span>
-              <span className="log-icon" aria-hidden="true">
-                {level === 'error' ? <XCircle size={12} /> :
-                 level === 'warn' ? <AlertTriangle size={12} /> :
-                 level === 'success' ? <CheckCircle2 size={12} /> :
-                 <Activity size={12} />}
-              </span>
-              <span className={`log-source ${log.eventType === 'tool_log' ? 'tool' : ''}`}>{source}</span>
-              <span className="log-message">{log.msg}</span>
-            </div>
-          );
-        })}
-      </div>
-    </div>
+      )}
+    </section>
   );
 }

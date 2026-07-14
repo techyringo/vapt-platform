@@ -1,9 +1,22 @@
 'use client';
 
 import type React from 'react';
-import { ClipboardCheck, Code2, GitBranch, LayoutDashboard, Settings, Shield, ShieldAlert, Wifi, WifiOff, Wrench } from 'lucide-react';
-
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
+import {
+  Activity,
+  ClipboardCheck,
+  Code2,
+  GitBranch,
+  LayoutDashboard,
+  Radar,
+  ScanSearch,
+  Settings,
+  Shield,
+  ShieldAlert,
+  Wifi,
+  WifiOff,
+  Wrench,
+} from 'lucide-react';
+import type { WorkspaceTab } from '@/types/navigation';
 
 interface SidebarItemProps {
   active: boolean;
@@ -30,8 +43,8 @@ function SidebarItem({ active, icon: Icon, label, count, onClick }: SidebarItemP
 }
 
 interface SidebarProps {
-  activeTab: Tab;
-  onTabChange: (tab: Tab) => void;
+  activeTab: WorkspaceTab;
+  onTabChange: (tab: WorkspaceTab) => void;
   scanCount: number;
   findingCount: number;
   attackPathCount: number;
@@ -63,10 +76,17 @@ export function Sidebar({
 
       {/* Nav items */}
       <nav className="sidebar-nav" aria-label="Main navigation">
+        <div className="sidebar-section-label">Overview</div>
         <SidebarItem active={activeTab === 'dashboard'} icon={LayoutDashboard} label="Command Center" count={scanCount} onClick={() => onTabChange('dashboard')} />
-        <SidebarItem active={activeTab === 'appsec'}    icon={Code2}          label="Code Security"                 onClick={() => onTabChange('appsec')} />
+        <div className="sidebar-section-label">Operations</div>
+        <SidebarItem active={activeTab === 'live'}      icon={Activity}        label="Live Scan"                    onClick={() => onTabChange('live')} />
+        <SidebarItem active={activeTab === 'recon'}     icon={Radar}           label="Recon Intel"                  onClick={() => onTabChange('recon')} />
+        <div className="sidebar-section-label">Results</div>
         <SidebarItem active={activeTab === 'findings'}  icon={ShieldAlert}     label="Findings" count={findingCount}  onClick={() => onTabChange('findings')} />
         <SidebarItem active={activeTab === 'agents'}    icon={GitBranch}       label="Attack Surface" count={attackPathCount} onClick={() => onTabChange('agents')} />
+        <div className="sidebar-section-label">Application Security</div>
+        <SidebarItem active={activeTab === 'appsec'}    icon={Code2}           label="SAST & Supply Chain"           onClick={() => onTabChange('appsec')} />
+        <SidebarItem active={activeTab === 'dast'}      icon={ScanSearch}      label="Adaptive DAST"                 onClick={() => onTabChange('dast')} />
         <SidebarItem active={activeTab === 'govern'}    icon={ClipboardCheck}  label="Test Coverage"              onClick={() => onTabChange('govern')} />
         <div className="sidebar-section-label">Administration</div>
         <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Operations"                    onClick={() => onTabChange('tools')} />

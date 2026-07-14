@@ -16,7 +16,9 @@ import {
   LayoutDashboard,
   Moon,
   Play,
+  Radar,
   RefreshCw,
+  ScanSearch,
   Server,
   Shield,
   ShieldAlert,
@@ -33,6 +35,7 @@ import { api } from '@/lib/api';
 import type { AgentDecision, AgentStatus, AssetGraph, AssuranceCoverage, AttackChainResult, DurableOperation, Finding, RuntimeLogFile, ScanCoverage, SSEEvent, Scan, ScanMode, ToolRun } from '@/types';
 import { SEVERITIES } from '@/types';
 import type { SeverityKey } from '@/types';
+import type { WorkspaceTab } from '@/types/navigation';
 
 // Layout
 import { Header } from '@/components/layout/Header';
@@ -55,9 +58,9 @@ import { AgentCard } from '@/components/features/AgentCard';
 import { LiveFeed, type LogMessage } from '@/components/features/LiveFeed';
 import { LLMConfigPanel } from '@/components/features/LLMConfigPanel';
 import { AppSecWorkspace } from '@/components/features/AppSecWorkspace';
+import { DastWorkspace, LiveScanWorkspace, ReconIntelWorkspace } from '@/components/features/AssessmentWorkspaces';
 
 /* ─── Types ─────────────────────────────────────────────── */
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
 type SeverityFilter = SeverityKey | 'all';
 const SEVERITY_FILTERS = ['all', ...SEVERITIES] as const;
 
@@ -244,7 +247,7 @@ export default function Dashboard() {
 
   /* UI state */
   const [logMessages,       setLogMessages]       = useState<LogMessage[]>([]);
-  const [activeTab,         setActiveTab]         = useState<Tab>('dashboard');
+  const [activeTab,         setActiveTab]         = useState<WorkspaceTab>('dashboard');
   const [severityFilter,    setSeverityFilter]    = useState<SeverityFilter>('all');
   const [showQuarantined,   setShowQuarantined]   = useState(false);
   const [expandedFindings,  setExpandedFindings]  = useState<Set<string>>(new Set());
@@ -267,7 +270,6 @@ export default function Dashboard() {
   const [authorizationConfirmed, setAuthorizationConfirmed] = useState(false);
   const [labTargetConfirmed, setLabTargetConfirmed] = useState(false);
 
-  const logRef           = useRef<HTMLDivElement>(null);
   const seenEventsRef    = useRef<Set<string>>(new Set());
   // Keep a ref to selectedScanId so callbacks always see the current value
   // without needing to re-create on every selection change.
@@ -532,10 +534,6 @@ export default function Dashboard() {
   }, [selectedScan?.scan_id, selectedScan?.status]);
 
   useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight;
-  }, [logMessages]);
-
-  useEffect(() => {
     const iv = setInterval(() => refreshAll().catch(() => {}), 30000);
     return () => clearInterval(iv);
   }, [refreshAll]);
@@ -793,8 +791,11 @@ export default function Dashboard() {
 
   const commandActions: CommandAction[] = [
     { id: 'nav-dashboard', group: 'Navigate', label: 'Command Center', sub: 'Authorised scopes and live execution', icon: LayoutDashboard, hint: ['1'], keywords: 'home overview scan dast', run: () => setActiveTab('dashboard') },
+    { id: 'nav-live', group: 'Navigate', label: 'Live Scan', sub: 'Durable actions, tool outcomes and evidence', icon: Activity, hint: ['2'], keywords: 'live mission telemetry operation', run: () => setActiveTab('live') },
+    { id: 'nav-recon', group: 'Navigate', label: 'Recon Intel', sub: 'Canonical attack surface inventory', icon: Radar, hint: ['3'], keywords: 'recon assets technology endpoints', run: () => setActiveTab('recon') },
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
     { id: 'nav-agents', group: 'Navigate', label: 'Attack Surface', sub: 'Canonical assets, paths and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence surface', run: () => setActiveTab('agents') },
+    { id: 'nav-dast', group: 'Navigate', label: 'Adaptive DAST', sub: 'Typed validators and WSTG evidence', icon: ScanSearch, keywords: 'dast web testing validation proof', run: () => setActiveTab('dast') },
     { id: 'nav-govern', group: 'Navigate', label: 'Test Coverage', sub: 'OWASP WSTG evidence coverage', icon: ClipboardCheck, hint: ['4'], keywords: 'wstg asvs testing evidence audit', run: () => setActiveTab('govern') },
     { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['5'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
@@ -1188,8 +1189,6 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* Live feed */}
-                    <LiveFeed logs={visibleLogs} logRef={logRef} selectedScan={selectedScan} />
                   </div>
                 </section>
               </div>
@@ -1741,6 +1740,36 @@ export default function Dashboard() {
             </section>
           )}
 
+          {activeTab === 'live' && (
+            <LiveScanWorkspace
+              selectedScan={selectedScan}
+              scans={scans}
+              operation={operation}
+              toolRuns={toolRuns}
+              findings={findings}
+              assetGraph={assetGraph}
+              decisions={decisions}
+              onSelectScan={setSelectedScanId}
+              onStop={stopScan}
+              onReport={() => setShowReportModal(true)}
+            />
+          )}
+
+          {activeTab === 'recon' && (
+            <ReconIntelWorkspace selectedScan={selectedScan} graph={assetGraph} toolRuns={toolRuns} />
+          )}
+
+          {activeTab === 'dast' && (
+            <DastWorkspace
+              selectedScan={selectedScan}
+              assurance={assurance}
+              findings={findings}
+              toolRuns={toolRuns}
+              decisions={decisions}
+              onStartAssessment={() => { setScanMode('full_vapt'); setActiveTab('dashboard'); }}
+            />
+          )}
+
           {activeTab === 'appsec' && <AppSecWorkspace />}
 
           {/* ── CONFIG TAB ─────────────────────────────────── */}
@@ -1749,6 +1778,12 @@ export default function Dashboard() {
           )}
 
         </main>
+        <LiveFeed
+          logs={visibleLogs}
+          selectedScan={selectedScan}
+          connected={connected}
+          onClear={() => setLogMessages([])}
+        />
       </div>
     </div>
   );

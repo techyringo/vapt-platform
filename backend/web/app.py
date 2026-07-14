@@ -1346,7 +1346,8 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "coverage": {
                 "sast": {"status": "planned", "tool": "semgrep"},
                 "sca": {"status": "planned", "tool": "trivy"},
-                "secrets": {"status": "planned", "tool": "gitleaks"},
+                "iac": {"status": "planned", "tool": "trivy"},
+                "secrets": {"status": "planned", "tool": "gitleaks + trufflehog"},
             },
         })
         try:

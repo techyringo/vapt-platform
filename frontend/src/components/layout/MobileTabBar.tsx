@@ -1,19 +1,18 @@
 'use client';
 
-import { ClipboardCheck, Code2, GitBranch, LayoutDashboard, Settings, ShieldAlert } from 'lucide-react';
-
-type Tab = 'dashboard' | 'appsec' | 'findings' | 'agents' | 'govern' | 'tools' | 'config';
+import { Activity, Code2, LayoutDashboard, Radar, Settings, ShieldAlert } from 'lucide-react';
+import type { WorkspaceTab } from '@/types/navigation';
 
 const TABS = [
-  { tab: 'dashboard' as Tab, icon: LayoutDashboard, label: 'Command' },
-  { tab: 'appsec'    as Tab, icon: Code2,          label: 'Code' },
-  { tab: 'findings'  as Tab, icon: ShieldAlert,     label: 'Findings' },
-  { tab: 'agents'    as Tab, icon: GitBranch,       label: 'Surface' },
-  { tab: 'govern'    as Tab, icon: ClipboardCheck,  label: 'WSTG' },
-  { tab: 'config'    as Tab, icon: Settings,        label: 'Admin' },
+  { tab: 'dashboard' as WorkspaceTab, icon: LayoutDashboard, label: 'Command' },
+  { tab: 'live'      as WorkspaceTab, icon: Activity,        label: 'Live' },
+  { tab: 'recon'     as WorkspaceTab, icon: Radar,           label: 'Recon' },
+  { tab: 'findings'  as WorkspaceTab, icon: ShieldAlert,     label: 'Findings' },
+  { tab: 'appsec'    as WorkspaceTab, icon: Code2,           label: 'SAST' },
+  { tab: 'config'    as WorkspaceTab, icon: Settings,        label: 'Admin' },
 ] as const;
 
-export function MobileTabBar({ activeTab, onTabChange }: { activeTab: Tab; onTabChange: (tab: Tab) => void }) {
+export function MobileTabBar({ activeTab, onTabChange }: { activeTab: WorkspaceTab; onTabChange: (tab: WorkspaceTab) => void }) {
   return (
     <nav className="mobile-tabs lg:hidden flex items-center" aria-label="Mobile navigation">
       {TABS.map(({ tab, icon: Icon, label }) => (

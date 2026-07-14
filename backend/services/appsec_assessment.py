@@ -150,25 +150,37 @@ def semgrep_coverage(payload: dict, inventory: dict[str, object], duration: floa
     skipped = paths.get("skipped") if isinstance(paths.get("skipped"), list) else []
     errors = payload.get("errors") if isinstance(payload.get("errors"), list) else []
     code_files = sum(int(value) for value in (inventory.get("languages") or {}).values())
+    scanned_count = len(scanned) if scanned is not None else None
+    coverage_percent = (
+        round(min(100.0, (scanned_count / code_files) * 100), 1)
+        if code_files and scanned_count is not None
+        else (100.0 if not code_files else 0.0)
+    )
     status = "completed"
-    limitation = ""
+    limitations: list[str] = []
     if errors:
         status = "partial"
-        limitation = f"Semgrep reported {len(errors)} analysis error(s)."
-    if code_files and scanned is not None and not scanned:
+        limitations.append(f"Semgrep reported {len(errors)} analysis error(s).")
+    if code_files and scanned is None:
         status = "partial"
-        limitation = "Semgrep reported zero analyzed source files."
+        limitations.append("Semgrep did not report its analyzed-file inventory.")
+    elif code_files and scanned_count is not None and scanned_count < code_files:
+        status = "partial"
+        limitations.append(
+            f"Semgrep reported {scanned_count} analyzed source file(s) out of {code_files} discovered."
+        )
     evidence: dict[str, object] = {
         "status": status,
         "duration_seconds": round(float(duration), 2),
         "source_files": code_files,
+        "analysis_coverage_percent": coverage_percent,
         "scanner_errors": len(errors),
         "skipped_files": len(skipped),
     }
     if scanned is not None:
         evidence["scanned_files"] = len(scanned)
-    if limitation:
-        evidence["limitation"] = limitation
+    if limitations:
+        evidence["limitation"] = " ".join(limitations)
     return evidence
 
 
@@ -202,6 +214,7 @@ async def run_assessment(assessment_id: str, repository: str, ref: str, config: 
             "ownership": inventory["ownership"],
         })
         coverage["sca"].update({"manifests": inventory["manifests"]})
+        coverage["iac"].update({"manifests": inventory["manifests"]})
         store.update_appsec_assessment(assessment_id, {"commit_sha": revision, "phase": "sast", "progress": 15})
         semgrep_configs = [value for rulepack in rulepacks for value in ("--config", rulepack)]
         scanners = [

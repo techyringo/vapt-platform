@@ -1,4 +1,9 @@
-from core.dast_planner import DASTPlanner
+from urllib.parse import parse_qs, urlparse
+
+import httpx
+import pytest
+
+from core.dast_planner import DASTHypothesis, DASTPlanner, InputCandidate
 from core.dast_validators import DASTValidator
 
 
@@ -51,3 +56,50 @@ def test_planner_selects_oob_ssrf_for_url_inputs():
     hypotheses = planner.build_hypotheses(candidates)
 
     assert any(item.validator == "ssrf_http_oob" and item.candidate.parameter == "url" for item in hypotheses)
+
+
+@pytest.mark.asyncio
+async def test_sqli_validator_requires_paired_boolean_negative_control(monkeypatch):
+    validator = DASTValidator()
+    hypothesis = DASTHypothesis(
+        id="hyp_0001",
+        vuln_type="sqli",
+        validator="sqli_error_boolean",
+        candidate=InputCandidate(
+            id="inp_0001",
+            url="https://example.test/items?id=1",
+            method="GET",
+            parameter="id",
+            value="1",
+            source="parameter_discovery",
+        ),
+        reason="ID parameter may reach SQL query logic.",
+    )
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return False
+
+        async def get(self, url):
+            value = parse_qs(urlparse(url).query).get("id", [""])[0]
+            if "AND '1'='2" in value:
+                body = "No matching inventory records"
+            else:
+                body = "Inventory record 1: widget available"
+            return httpx.Response(200, request=httpx.Request("GET", url), text=body)
+
+    monkeypatch.setattr(validator, "_client", lambda **_kwargs: Client())
+    proof = await validator._validate_sqli(hypothesis)
+
+    assert proof is not None
+    assert proof.confirmed is True
+    assert "boolean-differential" in proof.tags
+    assert "NEGATIVE CONTROL" in proof.request_proof
+
+
+def test_response_similarity_is_bounded_and_whitespace_stable():
+    assert DASTValidator._response_similarity("hello   world", "hello\nworld") == 1.0
+    assert DASTValidator._response_similarity("allow", "deny") < 0.72

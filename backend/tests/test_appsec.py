@@ -156,7 +156,8 @@ def test_semgrep_coverage_rejects_false_success_with_zero_scanned_files() -> Non
     assert evidence["status"] == "partial"
     assert evidence["source_files"] == 4
     assert evidence["scanned_files"] == 0
-    assert "zero analyzed" in str(evidence["limitation"])
+    assert evidence["analysis_coverage_percent"] == 0.0
+    assert "0 analyzed source file" in str(evidence["limitation"])
 
 
 def test_semgrep_coverage_records_scanned_skipped_and_errors() -> None:
@@ -169,6 +170,18 @@ def test_semgrep_coverage_records_scanned_skipped_and_errors() -> None:
     assert evidence["scanned_files"] == 2
     assert evidence["skipped_files"] == 1
     assert evidence["scanner_errors"] == 1
+    assert evidence["analysis_coverage_percent"] == 100.0
+
+
+def test_semgrep_coverage_is_partial_when_discovered_source_is_not_fully_reported() -> None:
+    evidence = semgrep_coverage(
+        {"paths": {"scanned": ["a.py"], "skipped": []}, "errors": []},
+        {"languages": {"Python": 4}, "files": 4, "manifests": []},
+        1.2,
+    )
+    assert evidence["status"] == "partial"
+    assert evidence["analysis_coverage_percent"] == 25.0
+    assert "1 analyzed source file(s) out of 4" in str(evidence["limitation"])
 
 
 def test_appsec_store_round_trip(tmp_path) -> None:
