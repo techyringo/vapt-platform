@@ -22,3 +22,13 @@ def test_adaptive_budget_can_be_disabled(monkeypatch):
     monkeypatch.setenv("VAPT_ADAPTIVE_TOOL_TIMEOUTS", "false")
 
     assert adaptive_timeout_seconds("waybackurls", 90, ["example.test"]) == 90
+
+
+def test_caller_deadline_caps_adaptive_budget(tmp_path, monkeypatch):
+    monkeypatch.setenv("VAPT_ADAPTIVE_TOOL_TIMEOUTS", "true")
+    target_list = tmp_path / "targets.txt"
+    target_list.write_text("\n".join(f"https://example.test/{i}" for i in range(100)))
+
+    assert adaptive_timeout_seconds(
+        "nuclei", 300, ["-l", str(target_list)], hard_cap=420,
+    ) == 420

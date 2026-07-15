@@ -82,16 +82,15 @@ class CloudAgent(BaseAgent):
         cloud_assets = await self._fingerprint_cloud_infrastructure(domain, live_urls, subdomains)
 
         # Phase 3: S3 / Cloud Storage Checks
-        s3_candidates_checked = await self._check_cloud_storage(domain, subdomains)
+        s3_candidates_checked = await self._check_cloud_storage(domain, subdomains, live_urls)
 
         # Phase 4: SecurityTrails Integration
         await self._query_securitytrails(domain)
 
-        # Phase 5: Cloud Metadata Checks on discovered endpoints
-        for entry in live_urls[:10]:
-            url = entry.get("url", "")
-            if url and self.is_in_scope(url):
-                await self._check_cloud_metadata(url)
+        # Cloud metadata must only be tested through a target-controlled request
+        # primitive (for example a replayable SSRF candidate).  Contacting IMDS
+        # directly from the scanner proves scanner reachability, not a target
+        # vulnerability, and is therefore deliberately not performed here.
 
         # Phase 6: Azure/GCP specific checks
         await self._check_azure_resources(domain, subdomains)
@@ -300,30 +299,52 @@ class CloudAgent(BaseAgent):
             return []
         return candidates
 
-    async def _check_cloud_storage(self, domain: str, subdomains: list[str]) -> int:
-        """Check for exposed S3 buckets and cloud storage."""
+    @staticmethod
+    def _observed_s3_bucket(host: str) -> str | None:
+        """Extract a bucket only from an observed AWS S3 hostname.
+
+        A generic wordlist hit or a name guessed from the customer's domain is
+        not ownership evidence.  Only hosts already present in scoped recon
+        evidence may cross this attribution gate.
+        """
+        value = str(host or "").strip().lower().rstrip(".")
+        patterns = (
+            r"^(?P<bucket>[a-z0-9][a-z0-9.-]{1,61}[a-z0-9])\.s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com$",
+            r"^s3(?:[.-][a-z0-9-]+)?\.amazonaws\.com/(?P<bucket>[a-z0-9][a-z0-9.-]{1,61}[a-z0-9])$",
+        )
+        for pattern in patterns:
+            match = re.match(pattern, value)
+            if match:
+                return match.group("bucket")
+        return None
+
+    async def _check_cloud_storage(
+        self,
+        domain: str,
+        subdomains: list[str],
+        live_urls: list[dict[str, Any]] | None = None,
+    ) -> int:
+        """Validate public listing only for S3 assets observed in recon.
+
+        The bucket host is third-party infrastructure.  We therefore require a
+        persisted attribution edge from the authorized target (DNS, crawler or
+        live HTTP evidence) before sending a request.  Wordlist-derived names
+        remain discovery hints and can never become customer findings.
+        """
+        observed_hosts = [*subdomains]
+        for entry in live_urls or []:
+            raw = entry.get("url") if isinstance(entry, dict) else str(entry)
+            try:
+                host = urlparse(str(raw or "")).hostname
+            except ValueError:
+                host = None
+            if host:
+                observed_hosts.append(host)
         bucket_names = [
-            domain.replace(".", "-"),
-            domain.replace(".", ""),
-            f"{domain.split('.')[0]}-assets",
-            f"{domain.split('.')[0]}-media",
-            f"{domain.split('.')[0]}-uploads",
-            f"{domain.split('.')[0]}-backup",
-            f"{domain.split('.')[0]}-data",
-            f"{domain.split('.')[0]}-static",
-            f"{domain.split('.')[0]}-public",
-            f"{domain.split('.')[0]}-private",
-            f"{domain.split('.')[0]}-staging",
-            f"{domain.split('.')[0]}-prod",
-            f"{domain.split('.')[0]}-dev",
+            bucket
+            for host in observed_hosts
+            if (bucket := self._observed_s3_bucket(host))
         ]
-        bucket_names.extend(self._load_s3_wordlist_candidates(domain))
-
-        # Check for S3 bucket patterns in subdomains
-        for sub in subdomains:
-            if "s3" in sub.lower() or "bucket" in sub.lower() or "storage" in sub.lower():
-                bucket_names.append(sub)
-
         unique_buckets = list(dict.fromkeys(bucket_names))
         checked = 0
         async with httpx_client.AsyncClient(timeout=8, follow_redirects=True) as client:
@@ -334,8 +355,9 @@ class CloudAgent(BaseAgent):
                     if resp.status_code == 200 and "ListBucketResult" in resp.text:
                         finding = Finding(
                             title=f"Public S3 Bucket: {bucket}",
-                            description=f"An S3 bucket named '{bucket}' is publicly accessible and allows listing. "
-                                        f"This could expose sensitive files, backups, or user data to anyone on the internet.",
+                            description=f"The recon-observed S3 bucket '{bucket}' is publicly accessible and allows listing. "
+                                        f"This could expose files to anyone on the internet. Ownership must still be "
+                                        f"confirmed during analyst triage before customer attribution.",
                             severity=Severity.CRITICAL,
                             cvss_score=9.1,
                             agent_source=AgentType.CLOUD,
@@ -348,66 +370,13 @@ class CloudAgent(BaseAgent):
                                         "Use IAM policies for access control.",
                             cwe_ids=["CWE-312", "CWE-200"],
                             tags=["s3", "cloud-storage", "exposure", "aws", "data-leak", "replay-proof"],
-                            confidence="high",
-                            status="confirmed",
+                            confidence="medium",
+                            status="suspected",
                         )
                         self._add_finding(finding)
                 except Exception:
                     continue
         return checked
-
-    async def _check_cloud_metadata(self, url: str) -> None:
-        """Check if cloud metadata endpoints are accessible from the application."""
-        metadata_endpoints = [
-            ("AWS EC2 Metadata", "http://169.254.169.254/latest/meta-data/", "ami-id,instance-id"),
-            ("AWS IMDSv2 Token", "http://169.254.169.254/latest/api/token", "token"),
-            ("GCP Metadata", "http://metadata.google.internal/computeMetadata/v1/", "project-id"),
-            ("Azure IMDS", "http://169.254.169.254/metadata/instance?api-version=2021-02-01", "compute"),
-            ("DigitalOcean Metadata", "http://169.254.169.254/metadata/v1/", "droplet-id"),
-        ]
-
-        for name, endpoint, indicator in metadata_endpoints:
-            # Check if the web app can reach internal metadata (SSRF vector)
-            try:
-                async with httpx_client.AsyncClient(timeout=5, verify=False) as client:
-                    headers = {"User-Agent": "Mozilla/5.0"}
-                    if "google" in endpoint:
-                        headers["Metadata-Flavor"] = "Google"
-                    if "api/token" in endpoint:
-                        headers["X-aws-ec2-metadata-token-ttl-seconds"] = "21600"
-                        # Need to PUT first for IMDSv2
-                        try:
-                            put_resp = await client.put(endpoint, headers=headers, timeout=3)
-                            if put_resp.status_code == 200:
-                                headers["X-aws-ec2-metadata-token"] = put_resp.text.strip()
-                        except Exception:
-                            pass
-
-                    resp = await client.get(endpoint, headers=headers, timeout=3)
-                    if resp.status_code == 200 and len(resp.text) > 10:
-                        if any(kw in resp.text.lower() for kw in indicator.split(",")):
-                            finding = Finding(
-                                title=f"Cloud Metadata Accessible via Web App (SSRF): {name}",
-                                description=f"The web application at {url} can reach the {name} metadata endpoint. "
-                                            f"This indicates a potential SSRF vulnerability that could allow an attacker "
-                                            f"to access cloud instance metadata, including IAM credentials, API keys, "
-                                            f"and other sensitive configuration data.",
-                                severity=Severity.CRITICAL,
-                                cvss_score=9.8,
-                                agent_source=AgentType.CLOUD,
-                                target=Target(host=task_target_host(url)),
-                                evidence=f"Metadata endpoint: {endpoint}\nResponse preview: {resp.text[:300]}",
-                                remediation=f"Block access to internal/cloud metadata IP ranges (169.254.169.254, metadata.google.internal) "
-                                            f"at the network level. Implement SSRF protections in the application layer. "
-                                            f"Use IMDSv2 for AWS instances.",
-                                cwe_ids=["CWE-918", "CWE-200"],
-                                tags=["ssrf", "cloud-metadata", name.lower().replace(" ", "-"), "data-leak"],
-                                confidence="high",
-                                status="confirmed",
-                            )
-                            self._add_finding(finding)
-            except Exception:
-                continue
 
     async def _check_azure_resources(self, domain: str, subdomains: list[str]) -> None:
         """Check for Azure-specific misconfigurations."""

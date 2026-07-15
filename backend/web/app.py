@@ -97,6 +97,12 @@ class ToolSelectionRequest(BaseModel):
     include_aggressive: bool = False
 
 
+class FindingTriageRequest(BaseModel):
+    disposition: str
+    reason: str = ""
+    actor: str = "analyst"
+
+
 class RecoveryRequest(BaseModel):
     apply: bool = False
     stale_scan_age_seconds: int = 3600
@@ -858,7 +864,13 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
         }
         internal_tools = {"secretfinder"}
         tools = {}
-        tool_names = sorted(set(cfg.tools) | set(TOOL_CAPABILITIES))
+        # Operational readiness is not the capability catalogue. Registry-only
+        # ideas without an approved adapter must not be presented as deployment
+        # failures or inflate customer-facing "gap" counts.
+        tool_names = sorted(
+            name for name, configured_tool in cfg.tools.items()
+            if configured_tool.enabled
+        )
         for tool_name in tool_names:
             tool_cfg = cfg.get_tool_config(tool_name)
             capability = TOOL_CAPABILITIES.get(tool_name)
@@ -912,6 +924,7 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             }
         summary = {
             "total": len(tools),
+            "catalog_total": len(TOOL_CAPABILITIES),
             "docker": sum(1 for t in tools.values() if t["will_use"] == "docker"),
             "local": sum(1 for t in tools.values() if t["will_use"] == "local"),
             "internal": sum(1 for t in tools.values() if t["will_use"] == "internal"),
@@ -1522,6 +1535,22 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             "filters": {"severity": severity, "agent": agent, "status": status, "quarantined": quarantined},
             "findings": findings,
         }
+
+    @app.patch("/api/scans/{scan_id}/findings/{finding_id}/triage")
+    async def triage_finding(scan_id: str, finding_id: int, request: FindingTriageRequest):
+        """Apply an auditable analyst disposition to a canonical finding."""
+        mgr = get_manager(app)
+        if scan_id not in mgr._scans:
+            raise HTTPException(status_code=404, detail="Scan not found")
+        try:
+            finding = await mgr.triage_finding(
+                scan_id, finding_id, request.disposition, request.actor, request.reason,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if not finding:
+            raise HTTPException(status_code=404, detail="Finding not found")
+        return {"scan_id": scan_id, "finding": finding}
 
     @app.get("/api/scans/{scan_id}/tool-runs")
     async def get_tool_runs(scan_id: str):

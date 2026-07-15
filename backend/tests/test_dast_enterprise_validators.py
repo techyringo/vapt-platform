@@ -39,6 +39,29 @@ def test_planner_turns_arjun_and_js_discovery_into_testable_inputs():
     assert any(item.url == "https://example.com/api/users" for item in candidates)
 
 
+def test_large_crawl_cannot_starve_discovered_input_validators():
+    planner = DASTPlanner()
+    candidates = planner.collect_candidates(
+        recon_data={
+            "live_urls": [{"url": "https://example.com/"}],
+            "crawled_urls": [
+                *[f"https://example.com/content/{index}" for index in range(250)],
+                "https://example.com/search?q=needle&id=7",
+            ],
+        },
+        enum_data={
+            "parameters": [{"url": "https://example.com/fetch", "parameters": ["url"]}],
+        },
+    )
+    hypotheses = planner.build_hypotheses(candidates)
+    validators = {(item.validator, item.candidate.parameter) for item in hypotheses}
+
+    assert ("sqli_error_boolean", "q") in validators
+    assert ("sqli_error_boolean", "id") in validators
+    assert ("ssrf_http_oob", "url") in validators
+    assert sum(1 for item in candidates if item.parameter == "__response__") <= 12
+
+
 def test_jwt_header_decoder_detects_alg_none_header():
     token = "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ."
 

@@ -44,6 +44,12 @@ export const api = {
     return fetchAPI<{ total: number; findings: import('@/types').Finding[] }>(`/api/scans/${id}/findings?${params}`);
   },
 
+  triageFinding: (scanId: string, findingId: number, disposition: string, reason: string, actor: string = 'analyst') =>
+    fetchAPI<{ scan_id: string; finding: import('@/types').Finding }>(`/api/scans/${scanId}/findings/${findingId}/triage`, {
+      method: 'PATCH',
+      body: JSON.stringify({ disposition, reason, actor }),
+    }),
+
   getAssetGraph: (id: string, assetType?: string) => {
     const params = new URLSearchParams();
     if (assetType) params.set('asset_type', assetType);

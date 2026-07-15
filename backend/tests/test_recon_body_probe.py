@@ -82,6 +82,8 @@ async def test_gau_retries_once_at_lower_concurrency_and_keeps_partial_urls():
 
     assert urls == ["https://example.test/from-archive"]
     assert len(calls) == 2
-    assert calls[0]["args"][2] == "5"
-    assert calls[1]["args"][2] == "2"
-    assert agent.get_tool_runs()[0]["outcome"] == "partial"
+    first_threads = calls[0]["args"].index("--threads") + 1
+    retry_threads = calls[1]["args"].index("--threads") + 1
+    assert calls[0]["args"][first_threads] == "5"
+    assert calls[1]["args"][retry_threads] == "2"
+    assert [run["outcome"] for run in agent.get_tool_runs()] == ["failed", "partial"]

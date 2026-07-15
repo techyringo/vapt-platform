@@ -311,7 +311,10 @@ tools:
     timeout: 300
 
   wappalyzer:
-    enabled: true
+    # httpx uses ProjectDiscovery's Wappalyzer fingerprints and WhatWeb adds
+    # an independent detector. Do not advertise a standalone CLI adapter that
+    # is not installed in the approved worker image.
+    enabled: false
     timeout: 120
 
   whatweb:

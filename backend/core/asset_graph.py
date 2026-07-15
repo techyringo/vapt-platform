@@ -56,6 +56,7 @@ _TRACKING_PARAMETERS = {
     "utm_campaign", "utm_content", "utm_medium", "utm_source", "utm_term",
 }
 _UUID_OR_HASH = re.compile(r"^(?:[0-9a-f]{8}-[0-9a-f-]{27,}|[0-9a-f]{24,}|\d{4,})$", re.I)
+_SERVICE_VALUE = re.compile(r"^(?P<host>.+):(?P<port>\d{1,5})(?:/(?P<label>[^/]+))?$")
 
 
 def normalize_url(value: str) -> str:
@@ -85,6 +86,24 @@ def normalize_url(value: str) -> str:
     return urlunsplit((scheme, netloc, path, query, ""))
 
 
+def normalize_service(value: str, metadata: dict[str, Any] | None = None) -> str:
+    """Return a stable host/port/protocol service identity.
+
+    Service discovery enriches metadata over time.  The guessed service name
+    must not be part of identity, otherwise ``host:22`` and ``host:22/ssh``
+    render as two ports instead of one progressively enriched observation.
+    """
+    raw = str(value or "").strip()
+    match = _SERVICE_VALUE.match(raw)
+    if not match:
+        return raw
+    details = metadata or {}
+    protocol = str(details.get("protocol") or details.get("transport") or "tcp").lower()
+    if protocol not in {"tcp", "udp"}:
+        protocol = "tcp"
+    return f"{match.group('host').lower()}:{int(match.group('port'))}/{protocol}"
+
+
 class AssetGraphBuilder:
     """Collect graph nodes/edges from scan targets, findings, and agent output."""
 
@@ -102,7 +121,13 @@ class AssetGraphBuilder:
         metadata: dict[str, Any] | None = None,
     ) -> AssetNode | None:
         raw_value = str(value or "").strip()
-        value = normalize_url(raw_value) if asset_type in {"url", "api_endpoint", "js_file"} else raw_value
+        value = (
+            normalize_url(raw_value)
+            if asset_type in {"url", "api_endpoint", "js_file"}
+            else normalize_service(raw_value, metadata)
+            if asset_type == "service"
+            else raw_value
+        )
         if not value:
             return None
         normalized_metadata = dict(metadata or {})
@@ -251,7 +276,7 @@ class AssetGraphBuilder:
                     continue
                 service_name = port.get("service") or "unknown"
                 port_no = port.get("port") or port.get("target_port")
-                service_value = f"{host}:{port_no}/{service_name}"
+                service_value = f"{host}:{port_no}/{port.get('protocol') or 'tcp'}"
                 service_node = self.add_asset("service", service_value, source, "high", port)
                 self.add_edge(host_node, service_node, "exposes_service")
 
@@ -307,7 +332,13 @@ def canonical_graph_projection(
     for item in assets:
         asset_type = str(item.get("asset_type") or "unknown")
         raw_value = str(item.get("value") or "")
-        value = normalize_url(raw_value) if asset_type in {"url", "api_endpoint", "js_file"} else raw_value.strip()
+        value = (
+            normalize_url(raw_value)
+            if asset_type in {"url", "api_endpoint", "js_file"}
+            else normalize_service(raw_value, item.get("metadata") or {})
+            if asset_type == "service"
+            else raw_value.strip()
+        )
         if not value:
             continue
         node = AssetNode(asset_type, value, str(item.get("source") or "unknown"), str(item.get("confidence") or "medium"))

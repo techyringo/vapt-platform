@@ -24,6 +24,8 @@ export interface Scan {
 }
 
 export interface Finding {
+  finding_id: number;
+  fingerprint?: string;
   title: string;
   description: string;
   severity: 'critical' | 'high' | 'medium' | 'low' | 'informational';
@@ -51,6 +53,10 @@ export interface Finding {
   validation_notes?: string[];
   quarantined?: boolean;
   llm_reasoning?: Record<string, unknown>;
+  triage_status?: 'untriaged' | 'true_positive' | 'false_positive' | 'accepted_risk' | 'duplicate' | 'resolved' | 'needs_review';
+  triage_reason?: string;
+  triage_actor?: string;
+  triage_updated_at?: string;
   created_at: string;
 }
 
@@ -200,7 +206,7 @@ export interface NVDStats {
 }
 
 export interface SSEEvent {
-  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'agent_status' | 'agent_decision' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
+  type: 'scan_started' | 'phase_change' | 'phase_complete' | 'surface_update' | 'finding' | 'finding_triage' | 'agent_status' | 'agent_decision' | 'log' | 'tool_log' | 'scan_complete' | 'scan_failed' | 'scan_deleted' | 'ping';
   scan_id: string;
   timestamp: string;
   sequence?: number;

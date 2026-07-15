@@ -562,6 +562,7 @@ class VulnScannerAgent(BaseAgent):
                             max(240, self._adaptive_timeout(len(batch), 120, 20, batch_timeout)),
                         ),
                     ),
+                    timeout_cap=max(5, min(int(remaining), batch_timeout)),
                 )
                 self._record_tool_run(result, "vuln_scanning")
                 if result.stdout.strip():
@@ -888,6 +889,10 @@ class VulnScannerAgent(BaseAgent):
                     if result.stdout.strip():
                         findings = OutputParser.parse_wpscan(result.stdout)
                         findings = [item for item in findings if item.get("reportable") is not False]
+                        for item in findings:
+                            item.setdefault("source_tool", "wpscan")
+                            item.setdefault("target_url", wp_url)
+                            item.setdefault("scan_pass", enum_flags)
                         cms_findings.extend(findings)
                         logger.info(
                             "[VULN_SCAN] wpscan on {url} ({flags}): exit={code} findings={c} token={has_token}",
@@ -1036,16 +1041,24 @@ class VulnScannerAgent(BaseAgent):
         sorted_tags = sorted(matched_tags, key=lambda t: (0 if t in priority else 1, t))
         tag_arg = ",".join(sorted_tags[:40])  # nuclei handles tag-OR logic internally
 
+        # Infrastructure tags should be tested against origins, not every
+        # crawler path. Replaying the same host-level templates over hundreds
+        # of URLs creates multi-minute duplicate work and timeout cascades.
+        origin_targets = list(dict.fromkeys(
+            root for target in targets
+            if (root := self._canonical_root(target))
+        ))[:12]
+
         logger.info(
             "[VULN_SCAN] Tech-specific nuclei pass: tags={tags} targets={count}",
             tags=tag_arg,
-            count=len(targets),
+            count=len(origin_targets),
         )
 
         from tools.runner import shared_temp_path
         host_path = shared_temp_path(suffix=".txt")
         with open(host_path, "w") as f:
-            f.write("\n".join(targets))
+            f.write("\n".join(origin_targets))
 
         try:
             result = await self._runner.run(
@@ -1061,7 +1074,8 @@ class VulnScannerAgent(BaseAgent):
                     *self._nuclei_template_args(),
                     "-tags", tag_arg,
                 ],
-                timeout=self._adaptive_timeout(len(targets), 300, 15, 1200),
+                timeout=self._adaptive_timeout(len(origin_targets), 300, 15, 600),
+                timeout_cap=int(os.environ.get("VAPT_NUCLEI_TECH_TIMEOUT", "600")),
             )
             self._record_tool_run(result, "tech_specific_scanning")
             if result.stdout.strip():
@@ -1134,6 +1148,7 @@ class VulnScannerAgent(BaseAgent):
                     "-tags", tag_map.get(family, "cms"),
                 ],
                 timeout=self._adaptive_timeout(len(targets), 240, 20, 900),
+                timeout_cap=int(os.environ.get("VAPT_NUCLEI_CMS_TIMEOUT", "600")),
             )
             self._record_tool_run(result, "cms_scanning")
             parsed = OutputParser.parse_nuclei(result.stdout) if result.stdout.strip() else []

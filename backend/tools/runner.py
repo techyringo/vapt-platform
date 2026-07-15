@@ -139,6 +139,7 @@ def adaptive_timeout_seconds(
     requested_timeout: int,
     args: list[str],
     input_data: Optional[str] = None,
+    hard_cap: int | None = None,
 ) -> int:
     """Return a bounded, workload-aware tool runtime budget.
 
@@ -161,7 +162,10 @@ def adaptive_timeout_seconds(
         global_cap = max(60, int(os.environ.get("VAPT_TOOL_MAX_RUNTIME", "3600")))
     except ValueError:
         global_cap = 3600
-    return min(profile_cap, global_cap, max(base, calculated))
+    effective = min(profile_cap, global_cap, max(base, calculated))
+    if hard_cap is not None:
+        effective = min(effective, max(1, int(hard_cap)))
+    return effective
 
 
 def _get_semaphore() -> asyncio.Semaphore:
@@ -550,6 +554,7 @@ class DockerRunner:
         timeout: Optional[int] = None,
         env: Optional[dict[str, str]] = None,
         cwd: Optional[str] = None,
+        timeout_cap: Optional[int] = None,
     ) -> ToolResult:
         """Execute a security tool.
 
@@ -558,7 +563,7 @@ class DockerRunner:
         """
         configured = self._config.get_tool_config(tool_name).timeout
         effective_timeout = adaptive_timeout_seconds(
-            tool_name, timeout or configured, args, input_data,
+            tool_name, timeout or configured, args, input_data, timeout_cap,
         )
         if effective_timeout != (timeout or configured):
             logger.info(
@@ -582,6 +587,7 @@ class DockerRunner:
         cwd: Optional[str] = None,
         *,
         timeout_resolved: bool = False,
+        timeout_cap: Optional[int] = None,
     ) -> ToolResult:
         """Execute locally, bypassing the ARQ queue.
 
@@ -592,7 +598,7 @@ class DockerRunner:
         effective_timeout = timeout or configured
         if not timeout_resolved:
             effective_timeout = adaptive_timeout_seconds(
-                tool_name, effective_timeout, args, input_data,
+                tool_name, effective_timeout, args, input_data, timeout_cap,
             )
         return await self._run_local(tool_name, args, input_data, effective_timeout, env, cwd)
 

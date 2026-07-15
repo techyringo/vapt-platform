@@ -539,6 +539,22 @@ export default function Dashboard() {
     }
   }, [refreshAll, toast]);
 
+  const handleFindingTriage = useCallback(async (finding: Finding, disposition: string, reason: string) => {
+    if (!selectedScan?.scan_id || !finding.finding_id) return;
+    try {
+      const result = await api.triageFinding(
+        selectedScan.scan_id, finding.finding_id, disposition, reason,
+      );
+      setFindings(previous => previous.map(item => (
+        item.finding_id === finding.finding_id ? result.finding : item
+      )));
+      toast.success('Finding disposition recorded', disposition.replace(/_/g, ' '));
+    } catch (error) {
+      toast.error('Triage failed', error instanceof Error ? error.message : String(error));
+      throw error;
+    }
+  }, [selectedScan?.scan_id, toast]);
+
   const toggleFinding = useCallback((key: string) => {
     setExpandedFindings(prev => {
       const next = new Set(prev);
@@ -719,7 +735,7 @@ export default function Dashboard() {
     { id: 'nav-recon', group: 'Navigate', label: 'Recon Intel', sub: 'Canonical attack surface inventory', icon: Radar, hint: ['3'], keywords: 'recon assets technology endpoints', run: () => setActiveTab('recon') },
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
     { id: 'nav-agents', group: 'Navigate', label: 'Attack Surface', sub: 'Canonical assets, paths and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence surface', run: () => setActiveTab('agents') },
-    { id: 'nav-dast', group: 'Navigate', label: 'Adaptive DAST', sub: 'Typed validators and WSTG evidence', icon: ScanSearch, keywords: 'dast web testing validation proof', run: () => setActiveTab('dast') },
+    { id: 'nav-dast', group: 'Navigate', label: 'DAST & API Validation', sub: 'Typed validators and WSTG evidence', icon: ScanSearch, keywords: 'dast api web testing validation proof', run: () => setActiveTab('dast') },
     { id: 'nav-govern', group: 'Navigate', label: 'Test Coverage', sub: 'OWASP WSTG evidence coverage', icon: ClipboardCheck, hint: ['4'], keywords: 'wstg asvs testing evidence audit', run: () => setActiveTab('govern') },
     { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['5'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
@@ -1139,6 +1155,7 @@ export default function Dashboard() {
               refreshing={refreshing}
               onRefresh={handleRefresh}
               onReport={() => setShowReportModal(true)}
+              onTriage={handleFindingTriage}
             />
           )}
 

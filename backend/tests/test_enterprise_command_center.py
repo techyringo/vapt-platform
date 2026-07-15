@@ -65,9 +65,24 @@ def test_enum_ports_preserve_nmap_service_product_and_version():
     assets, _ = builder.records()
     service = next(item for item in assets if item["asset_type"] == "service")
 
-    assert service["value"] == "example.test:22/ssh"
+    assert service["value"] == "example.test:22/tcp"
     assert service["metadata"]["product"] == "OpenSSH"
     assert service["metadata"]["version"] == "OpenSSH 9.2p1"
+
+
+def test_service_identity_merges_unknown_and_enriched_observations():
+    builder = AssetGraphBuilder("scan")
+    builder.add_asset("service", "example.test:22", "finding", metadata={"port": 22})
+    builder.add_asset(
+        "service", "example.test:22/ssh", "enum", "high",
+        {"port": 22, "protocol": "tcp", "service": "ssh", "product": "OpenSSH"},
+    )
+
+    assets, _ = builder.records()
+    services = [item for item in assets if item["asset_type"] == "service"]
+    assert len(services) == 1
+    assert services[0]["value"] == "example.test:22/tcp"
+    assert services[0]["metadata"]["service"] == "ssh"
 
 
 def test_nmap_port_evidence_activates_service_specific_planning_tokens():

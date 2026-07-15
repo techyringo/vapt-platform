@@ -33,13 +33,14 @@ interface Props {
   refreshing: boolean;
   onRefresh: () => void;
   onReport: () => void;
+  onTriage: (finding: Finding, disposition: string, reason: string) => Promise<void>;
 }
 
 export function FindingsWorkspace(props: Props) {
   const {
     findings, filteredFindings, severityCounts, severityFilter, onSeverityFilter,
     showQuarantined, onShowQuarantined, quarantinedCount, expandedFindings,
-    onToggleFinding, loading, apiHealthy, selectedScan, refreshing, onRefresh, onReport,
+    onToggleFinding, loading, apiHealthy, selectedScan, refreshing, onRefresh, onReport, onTriage,
   } = props;
   return (
     <section>
@@ -73,7 +74,7 @@ export function FindingsWorkspace(props: Props) {
           ? <StateView variant="error" title="Couldn’t load findings" body="The backend is unreachable. Findings will appear once the connection is restored." onRetry={onRefresh} />
           : <StateView variant="empty" icon={ShieldCheck} title="No findings loaded" body="Select a completed scan, or launch one—findings surface here in real time." />)
         : filteredFindings.length === 0 ? <StateView variant="no-results" title="No matching findings" body={`Nothing matches the "${label(severityFilter)}" filter${showQuarantined ? '' : '—quarantined findings are hidden.'}`} action={<button className="btn btn-secondary" onClick={() => { onSeverityFilter('all'); onShowQuarantined(true); }}>Clear filters</button>} />
-        : <div style={{ display: 'grid', gap: 8 }}>{filteredFindings.map((finding, index) => { const key = `${finding.title}|${finding.target_host}|${finding.created_at || index}`; return <FindingCard key={key} finding={finding} expanded={expandedFindings.has(key)} onToggle={() => onToggleFinding(key)} />; })}</div>}
+        : <div style={{ display: 'grid', gap: 8 }}>{filteredFindings.map((finding, index) => { const key = `${finding.finding_id || finding.title}|${finding.target_host}|${finding.created_at || index}`; return <FindingCard key={key} finding={finding} expanded={expandedFindings.has(key)} onToggle={() => onToggleFinding(key)} onTriage={onTriage} />; })}</div>}
     </section>
   );
 }

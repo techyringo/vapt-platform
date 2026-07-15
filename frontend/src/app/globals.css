@@ -1252,6 +1252,58 @@ select.field option { background: var(--bg-elevated); color: var(--text-primary)
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.finding-triage-panel {
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--accent) 28%, var(--border));
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--accent) 5%, var(--bg-elevated));
+}
+
+.finding-triage-panel p,
+.finding-triage-panel small {
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.finding-triage-panel textarea {
+  width: 100%;
+  resize: vertical;
+  padding: 8px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font: 11px/1.45 var(--font-jetbrains), monospace;
+}
+
+.finding-triage-panel > div:last-of-type {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.finding-triage-panel button {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg-elevated);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.finding-triage-panel button:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--text-primary);
+}
 .finding-poc-steps {
   display: grid;
   gap: 7px;

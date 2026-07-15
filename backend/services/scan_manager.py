@@ -1809,6 +1809,41 @@ class ScanManager:
             displayed = [f for f in displayed if bool(f.get("quarantined")) == quarantined]
         return displayed
 
+    async def triage_finding(
+        self,
+        scan_id: str,
+        finding_id: int,
+        disposition: str,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        """Apply an analyst disposition and keep an immutable audit event."""
+        updated = await self._store.triage_finding_async(
+            scan_id, finding_id, disposition, actor, reason,
+        )
+        if not updated:
+            return None
+        findings = self._findings.setdefault(scan_id, [])
+        for index, item in enumerate(findings):
+            if int(item.get("finding_id") or -1) == finding_id:
+                findings[index] = updated
+                break
+        else:
+            # Older in-memory rows were hydrated before finding ids were
+            # exposed. Refresh the canonical set rather than guessing by title.
+            self._findings[scan_id] = self._store.load_findings(scan_id)
+        history = self._store.load_finding_triage(scan_id, finding_id)
+        await self._broadcast(ScanEvent(
+            event_type="finding_triage",
+            scan_id=scan_id,
+            data={
+                "finding_id": finding_id,
+                "disposition": disposition,
+                "actor": actor,
+            },
+        ))
+        return {**self._display_finding(updated), "triage_history": history}
+
     def build_report_scan_result(self, scan_id: str) -> Optional[ScanResult]:
         """Build a report-ready ScanResult from the canonical manager store.
 

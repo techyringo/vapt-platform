@@ -119,44 +119,34 @@ class DASTPlanner:
             target = getattr(finding, "target", None)
             add_url(getattr(target, "url", "") if target is not None else "", "finding")
 
+        # Parameter-bearing and explicit parameter-discovery evidence must win
+        # the bounded validation budget. On a large crawl, inserting one generic
+        # response candidate per URL first starved SQLi/XSS/SSRF validators.
+        source_priority = {
+            "parameter_discovery": 0,
+            "javascript_endpoint": 1,
+            "fuzzer": 2,
+            "crawled_url": 3,
+            "historical_url": 4,
+            "live_url": 5,
+        }
+        urls.sort(key=lambda item: (
+            0 if urlparse(item[0]).query else 1,
+            source_priority.get(item[1], 6),
+            item[0],
+        ))
+
         candidates: list[InputCandidate] = []
         seen: set[tuple[str, str]] = set()
+        response_origins: set[str] = set()
+        response_budget = 12
         for url, source in urls:
             parsed = urlparse(url)
             if not parsed.scheme or not parsed.netloc:
                 continue
-            resource_key = (url, "__resource__")
-            if parsed.path.lower().endswith(".js") and resource_key not in seen:
-                seen.add(resource_key)
-                candidates.append(InputCandidate(
-                    id=f"inp_{len(candidates) + 1:04d}",
-                    url=url,
-                    method="GET",
-                    parameter="__resource__",
-                    value="",
-                    source=source,
-                    reason=f"Discovered JavaScript resource in {source}.",
-                ))
-                if len(candidates) >= self.MAX_CANDIDATES:
-                    return candidates
 
-            response_key = (urlunparse(parsed._replace(query="")), "__response__")
-            if response_key not in seen:
-                seen.add(response_key)
-                candidates.append(InputCandidate(
-                    id=f"inp_{len(candidates) + 1:04d}",
-                    url=urlunparse(parsed._replace(query="")),
-                    method="GET",
-                    parameter="__response__",
-                    value="",
-                    source=source,
-                    reason=f"Discovered response surface in {source}.",
-                ))
-                if len(candidates) >= self.MAX_CANDIDATES:
-                    return candidates
-
-            if not parsed.query:
-                continue
+            # Test discovered inputs before inventory-only resource/response
+            # checks. This is where issue-specific validators get their work.
             for name, value in parse_qsl(parsed.query, keep_blank_values=True):
                 key = (self._normalise_param_url(url, name), name.lower())
                 if key in seen:
@@ -173,6 +163,44 @@ class DASTPlanner:
                 ))
                 if len(candidates) >= self.MAX_CANDIDATES:
                     return candidates
+
+            resource_key = (url, "__resource__")
+            if parsed.path.lower().endswith(".js") and resource_key not in seen:
+                seen.add(resource_key)
+                candidates.append(InputCandidate(
+                    id=f"inp_{len(candidates) + 1:04d}",
+                    url=url,
+                    method="GET",
+                    parameter="__resource__",
+                    value="",
+                    source=source,
+                    reason=f"Discovered JavaScript resource in {source}.",
+                ))
+                if len(candidates) >= self.MAX_CANDIDATES:
+                    return candidates
+
+            response_url = urlunparse(parsed._replace(query=""))
+            response_origin = f"{parsed.scheme}://{parsed.netloc}"
+            response_key = (response_url, "__response__")
+            if (
+                len(response_origins) < response_budget
+                and (source == "javascript_endpoint" or response_origin not in response_origins)
+                and response_key not in seen
+            ):
+                seen.add(response_key)
+                response_origins.add(response_origin)
+                candidates.append(InputCandidate(
+                    id=f"inp_{len(candidates) + 1:04d}",
+                    url=urlunparse(parsed._replace(query="")),
+                    method="GET",
+                    parameter="__response__",
+                    value="",
+                    source=source,
+                    reason=f"Discovered response surface in {source}.",
+                ))
+                if len(candidates) >= self.MAX_CANDIDATES:
+                    return candidates
+
         return candidates
 
     def build_hypotheses(self, candidates: list[InputCandidate]) -> list[DASTHypothesis]:

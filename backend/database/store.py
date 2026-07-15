@@ -161,6 +161,18 @@ class PersistenceStore:
                     FOREIGN KEY(scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE
                 );
 
+                CREATE TABLE IF NOT EXISTS finding_triage_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    scan_id TEXT NOT NULL,
+                    finding_id INTEGER NOT NULL,
+                    disposition TEXT NOT NULL,
+                    actor TEXT NOT NULL,
+                    reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(scan_id) REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    FOREIGN KEY(finding_id) REFERENCES findings(id) ON DELETE CASCADE
+                );
+
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     scan_id TEXT NOT NULL,
@@ -335,6 +347,7 @@ class PersistenceStore:
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
+                CREATE INDEX IF NOT EXISTS idx_finding_triage ON finding_triage_events(scan_id, finding_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id, id);
                 CREATE INDEX IF NOT EXISTS idx_tool_runs_scan ON tool_runs(scan_id, id);
                 CREATE INDEX IF NOT EXISTS idx_durable_actions_scan ON durable_actions(scan_id, queued_at);
@@ -369,6 +382,10 @@ class PersistenceStore:
             self._ensure_column(conn, "findings", "validation_notes_json", "TEXT NOT NULL DEFAULT '[]'")
             self._ensure_column(conn, "findings", "quarantined", "INTEGER NOT NULL DEFAULT 0")
             self._ensure_column(conn, "findings", "llm_reasoning_json", "TEXT NOT NULL DEFAULT '{}'")
+            self._ensure_column(conn, "findings", "triage_status", "TEXT NOT NULL DEFAULT 'untriaged'")
+            self._ensure_column(conn, "findings", "triage_reason", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "findings", "triage_actor", "TEXT NOT NULL DEFAULT ''")
+            self._ensure_column(conn, "findings", "triage_updated_at", "TEXT")
             self._ensure_column(conn, "scans", "scan_metadata_json", "TEXT NOT NULL DEFAULT '{}'")
 
     @staticmethod
@@ -613,13 +630,13 @@ class PersistenceStore:
                     cwe_ids_json=excluded.cwe_ids_json,
                     tags_json=excluded.tags_json,
                     confidence=excluded.confidence,
-                status=excluded.status,
+                    status=CASE WHEN findings.triage_status = 'untriaged' THEN excluded.status ELSE findings.status END,
                     agent_source=excluded.agent_source,
                     nvd_verified=excluded.nvd_verified,
                     evidence_score=excluded.evidence_score,
                     evidence_grade=excluded.evidence_grade,
                     validation_notes_json=excluded.validation_notes_json,
-                    quarantined=excluded.quarantined,
+                    quarantined=CASE WHEN findings.triage_status = 'false_positive' THEN 1 ELSE excluded.quarantined END,
                     llm_reasoning_json=excluded.llm_reasoning_json,
                 updated_at=excluded.updated_at
                 """,
@@ -669,6 +686,89 @@ class PersistenceStore:
             ).fetchall()
         return [self._finding_from_row(row) for row in rows]
 
+    def triage_finding(
+        self,
+        scan_id: str,
+        finding_id: int,
+        disposition: str,
+        actor: str,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        allowed = {
+            "true_positive", "false_positive", "accepted_risk", "duplicate",
+            "resolved", "needs_review",
+        }
+        disposition = str(disposition or "").strip().lower()
+        if disposition not in allowed:
+            raise ValueError(f"Unsupported finding disposition: {disposition}")
+        actor = str(actor or "analyst").strip()[:120] or "analyst"
+        reason = str(reason or "").strip()[:4000]
+        now = _utc_now()
+        status_sql = (
+            "confirmed" if disposition == "true_positive"
+            else "false_positive" if disposition == "false_positive"
+            else None
+        )
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT id FROM findings WHERE scan_id = ? AND id = ?",
+                (scan_id, finding_id),
+            ).fetchone()
+            if not row:
+                return None
+            if status_sql:
+                conn.execute(
+                    """
+                    UPDATE findings
+                    SET triage_status = ?, triage_reason = ?, triage_actor = ?,
+                        triage_updated_at = ?, status = ?, quarantined = ?, updated_at = ?
+                    WHERE scan_id = ? AND id = ?
+                    """,
+                    (
+                        disposition, reason, actor, now, status_sql,
+                        1 if disposition == "false_positive" else 0,
+                        now, scan_id, finding_id,
+                    ),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE findings
+                    SET triage_status = ?, triage_reason = ?, triage_actor = ?,
+                        triage_updated_at = ?, updated_at = ?
+                    WHERE scan_id = ? AND id = ?
+                    """,
+                    (disposition, reason, actor, now, now, scan_id, finding_id),
+                )
+            conn.execute(
+                """
+                INSERT INTO finding_triage_events (
+                    scan_id, finding_id, disposition, actor, reason, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (scan_id, finding_id, disposition, actor, reason, now),
+            )
+            updated = conn.execute(
+                "SELECT * FROM findings WHERE scan_id = ? AND id = ?",
+                (scan_id, finding_id),
+            ).fetchone()
+        return self._finding_from_row(updated) if updated else None
+
+    async def triage_finding_async(self, *args, **kwargs) -> dict[str, Any] | None:
+        return await self._run_sync(self.triage_finding, *args, **kwargs)
+
+    def load_finding_triage(self, scan_id: str, finding_id: int) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT disposition, actor, reason, created_at
+                FROM finding_triage_events
+                WHERE scan_id = ? AND finding_id = ? ORDER BY id DESC
+                """,
+                (scan_id, finding_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def load_all_findings(self) -> dict[str, list[dict[str, Any]]]:
         with self._lock, self._connect() as conn:
             rows = conn.execute("SELECT * FROM findings ORDER BY id ASC").fetchall()
@@ -680,6 +780,8 @@ class PersistenceStore:
     @staticmethod
     def _finding_from_row(row: sqlite3.Row) -> dict[str, Any]:
         return {
+            "finding_id": row["id"],
+            "fingerprint": row["dedupe_key"],
             "title": row["title"],
             "description": row["description"],
             "severity": row["severity"],
@@ -706,6 +808,10 @@ class PersistenceStore:
             "validation_notes": _json_load(row["validation_notes_json"], []),
             "quarantined": bool(row["quarantined"]),
             "llm_reasoning": _json_load(row["llm_reasoning_json"], {}),
+            "triage_status": row["triage_status"],
+            "triage_reason": row["triage_reason"],
+            "triage_actor": row["triage_actor"],
+            "triage_updated_at": row["triage_updated_at"],
             "created_at": row["created_at"],
         }
 
@@ -806,6 +912,24 @@ class PersistenceStore:
         stdout_artifact = self._write_tool_artifact(scan_id, agent_type, run, "stdout", stdout, now)
         stderr_artifact = self._write_tool_artifact(scan_id, agent_type, run, "stderr", stderr, now)
         with self._lock, self._connect() as conn:
+            # A worker can finish after the API process restarted and before
+            # in-memory scan hydration. Preserve the durable runner artifact
+            # under a clearly marked recovery record instead of losing it to a
+            # foreign-key failure.
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO scans (
+                    scan_id, name, mode, status, current_phase, targets_json,
+                    start_time, end_time, duration, profile_agents_json,
+                    exploit_enabled, nvd_stats_json, report_base_name,
+                    report_output_dir, error, total_agent_tasks,
+                    scan_metadata_json, created_at, updated_at
+                ) VALUES (?, ?, '', 'running', ?, '[]', ?, NULL, 0, '[]', 0,
+                          '{}', '', '', 'Recovered orphan runner evidence', 0,
+                          '{"recovered_runner_evidence": true}', ?, ?)
+                """,
+                (scan_id, f"Recovered operation {scan_id}", run.get("phase", "init"), now, now, now),
+            )
             conn.execute(
                 """
                 INSERT INTO tool_runs (

@@ -1,6 +1,7 @@
 'use client';
 
-import { ChevronDown, ExternalLink, Globe2, Target } from 'lucide-react';
+import { useState } from 'react';
+import { Check, ChevronDown, ExternalLink, Flag, Globe2, Target, X } from 'lucide-react';
 import type { Finding, SeverityKey } from '@/types';
 import { SEV_HEX } from './SeverityDonut';
 
@@ -16,15 +17,26 @@ interface FindingCardProps {
   finding: Finding;
   expanded: boolean;
   onToggle: () => void;
+  onTriage: (finding: Finding, disposition: string, reason: string) => Promise<void>;
 }
 
-export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
+export function FindingCard({ finding, expanded, onToggle, onTriage }: FindingCardProps) {
+  const [reason, setReason] = useState(finding.triage_reason || '');
+  const [saving, setSaving] = useState(false);
   const accent = SEV_HEX[finding.severity as SeverityKey] || '#06b6d4';
   const targetLabel = finding.target_display || `${finding.target_host}${finding.target_port ? `:${finding.target_port}` : ''}`;
   const validationNotes = finding.validation_notes || [];
   const llmReasoning = finding.llm_reasoning && Object.keys(finding.llm_reasoning).length
     ? (finding.llm_reasoning as Record<string, any>)
     : null;
+  const applyTriage = async (disposition: string) => {
+    setSaving(true);
+    try {
+      await onTriage(finding, disposition, reason);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   return (
     <article
@@ -94,6 +106,11 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
             <span className={`badge ${finding.status === 'confirmed' ? 'badge-completed' : 'badge-running'}`}>
               {finding.status === 'confirmed' ? 'behavior verified' : (finding.tags || []).includes('version-applicability-candidate') ? 'version matched' : finding.status || 'candidate'}
             </span>
+            {finding.triage_status && finding.triage_status !== 'untriaged' && (
+              <span className={`badge ${finding.triage_status === 'true_positive' ? 'badge-completed' : finding.triage_status === 'false_positive' ? 'badge-idle' : 'badge-running'}`}>
+                analyst: {finding.triage_status.replace(/_/g, ' ')}
+              </span>
+            )}
           </div>
           <div style={{ marginTop: 5, display: 'flex', flexWrap: 'wrap', gap: 8, fontSize: 11 }}>
             <span style={{ fontFamily: 'var(--font-jetbrains), monospace', color: 'var(--text-muted)' }}>
@@ -245,6 +262,24 @@ export function FindingCard({ finding, expanded, onToggle }: FindingCardProps) {
                     </div>
                   )}
                 </div>
+              </div>
+
+              <div className="finding-triage-panel">
+                <div className="section-label">Analyst disposition</div>
+                <p>Scanner evidence stays immutable. The decision records actor, reason and time.</p>
+                <textarea
+                  value={reason}
+                  onChange={event => setReason(event.target.value)}
+                  placeholder="Reason, ticket, duplicate or compensating control"
+                  rows={3}
+                  disabled={saving}
+                />
+                <div>
+                  <button type="button" disabled={saving} onClick={() => applyTriage('true_positive')}><Check size={12} />True positive</button>
+                  <button type="button" disabled={saving} onClick={() => applyTriage('false_positive')}><X size={12} />False positive</button>
+                  <button type="button" disabled={saving} onClick={() => applyTriage('accepted_risk')}><Flag size={12} />Accept risk</button>
+                </div>
+                {finding.triage_actor && <small>{finding.triage_actor} · {finding.triage_updated_at ? new Date(finding.triage_updated_at).toLocaleString() : 'recorded'}</small>}
               </div>
 
               {/* CVEs / CWEs */}

@@ -548,12 +548,29 @@ class ReconAgent(BaseAgent):
         timeout = max(30, int(os.environ.get("VAPT_GAU_TIMEOUT", "90")))
         result = await self._runner.run(
             tool_name="gau",
-            args=["--threads", "3", domain],
+            args=["--threads", "5", domain],
             timeout=timeout,
         )
         self._record_tool_run(result, "recon")
-        if result.stdout.strip():
-            urls = sorted({u.strip() for u in result.stdout.splitlines() if u.strip().startswith(("http://", "https://"))})
+        urls = sorted({u.strip() for u in result.stdout.splitlines() if u.strip().startswith(("http://", "https://"))})
+        # Provider fan-out can fail transiently even when GAU itself is healthy.
+        # Retry once at one thread only when the first attempt produced no
+        # usable evidence. Preserve partial output even when a provider keeps
+        # the process exit code non-zero.
+        if not urls and not result.success:
+            retry = await self._runner.run(
+                tool_name="gau",
+                args=["--threads", "2", domain],
+                timeout=max(timeout, int(os.environ.get("VAPT_GAU_RETRY_TIMEOUT", "180"))),
+            )
+            self._record_tool_run(retry, "recon")
+            urls = sorted({
+                value.strip()
+                for value in retry.stdout.splitlines()
+                if value.strip().startswith(("http://", "https://"))
+            })
+            result = retry
+        if urls:
             logger.info(
                 "[RECON] gau: {count} URLs ({outcome})",
                 count=len(urls), outcome=result.outcome,

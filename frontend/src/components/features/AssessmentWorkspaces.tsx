@@ -382,9 +382,9 @@ export function DastWorkspace({ selectedScan, assurance, findings, toolRuns, dec
     <section className="enterprise-workspace">
       <WorkspaceHeading
         icon={ScanSearch}
-        eyebrow="Evidence-gated dynamic testing"
-        title="Adaptive DAST"
-        description="Observed surface selects eligible tests; deterministic policy authorises execution; issue-specific validators decide whether evidence is sufficient for confirmation."
+        eyebrow="OWASP WSTG execution"
+        title="DAST & API Validation"
+        description="Dynamic tests run against discovered endpoints and parameters. The adaptive scheduler chooses relevant work; deterministic validators—not the model—decide whether a vulnerability is confirmed."
         right={<button className="btn btn-primary" onClick={onStartAssessment}><ScanSearch size={14} />New authorised assessment</button>}
       />
 
