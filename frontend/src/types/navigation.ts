@@ -6,6 +6,7 @@ export type WorkspaceTab =
   | 'agents'
   | 'appsec'
   | 'dast'
+  | 'reports'
   | 'govern'
   | 'tools'
   | 'config';

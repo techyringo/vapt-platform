@@ -1,6 +1,6 @@
 'use client';
 
-import { Activity, Code2, LayoutDashboard, Radar, Settings, ShieldAlert } from 'lucide-react';
+import { Activity, Code2, FileText, LayoutDashboard, Radar, ShieldAlert } from 'lucide-react';
 import type { WorkspaceTab } from '@/types/navigation';
 
 const TABS = [
@@ -9,7 +9,7 @@ const TABS = [
   { tab: 'recon'     as WorkspaceTab, icon: Radar,           label: 'Recon' },
   { tab: 'findings'  as WorkspaceTab, icon: ShieldAlert,     label: 'Findings' },
   { tab: 'appsec'    as WorkspaceTab, icon: Code2,           label: 'SAST' },
-  { tab: 'config'    as WorkspaceTab, icon: Settings,        label: 'Admin' },
+  { tab: 'reports'   as WorkspaceTab, icon: FileText,        label: 'Reports' },
 ] as const;
 
 export function MobileTabBar({ activeTab, onTabChange }: { activeTab: WorkspaceTab; onTabChange: (tab: WorkspaceTab) => void }) {

@@ -471,6 +471,80 @@ export interface AppSecAssessment {
   tool_runs?: Array<Record<string, unknown>>;
 }
 
+export interface ReportStudioArtifact {
+  id: number;
+  report_id: string;
+  kind: 'json' | 'markdown' | 'html' | 'pdf' | string;
+  format: string;
+  filename: string;
+  sha256: string;
+  size: number;
+  created_at: string;
+}
+
+export interface ReportStudioFinding {
+  fingerprint: string;
+  title: string;
+  description: string;
+  severity: SeverityKey;
+  cvss_score?: number | null;
+  cvss_vector?: string;
+  target: string;
+  evidence: string;
+  request_proof?: string;
+  response_proof?: string;
+  remediation: string;
+  business_impact?: string;
+  cve_ids: string[];
+  cwe_ids: string[];
+  references: string[];
+  confidence: string;
+  status: 'confirmed' | 'observed';
+  source_file: string;
+}
+
+export interface ReportStudioJob {
+  report_id: string;
+  name: string;
+  client_name: string;
+  assessment_type: string;
+  template_id: string;
+  status: 'queued' | 'running' | 'partial' | 'completed' | 'failed';
+  phase: string;
+  progress: number;
+  scope: string[];
+  metadata: Record<string, string>;
+  source_manifest: Array<{ filename: string; media_type: string; sha256: string; size: number }>;
+  findings: ReportStudioFinding[];
+  narrative: {
+    executive_summary?: string;
+    risk_statement?: string;
+    key_recommendations?: string[];
+    methodology_note?: string;
+    llm_used?: boolean;
+  };
+  summary: {
+    total_findings?: number;
+    severities?: Partial<Record<SeverityKey, number>>;
+    confirmed?: number;
+    observed?: number;
+    source_count?: number;
+    source_bytes?: number;
+    limitations?: string[];
+  };
+  artifacts?: ReportStudioArtifact[];
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ReportStudioTemplate {
+  id: string;
+  name: string;
+  description: string;
+  sections: string[];
+}
+
 export interface LLMFallbackProvider {
   provider: string;
   model: string;

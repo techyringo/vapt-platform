@@ -346,6 +346,42 @@ class PersistenceStore:
                     UNIQUE(assessment_id, kind, format)
                 );
 
+                CREATE TABLE IF NOT EXISTS report_studio_jobs (
+                    report_id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    client_name TEXT NOT NULL DEFAULT '',
+                    assessment_type TEXT NOT NULL DEFAULT 'vapt',
+                    template_id TEXT NOT NULL DEFAULT 'vapt_standard',
+                    status TEXT NOT NULL DEFAULT 'queued',
+                    phase TEXT NOT NULL DEFAULT 'queued',
+                    progress INTEGER NOT NULL DEFAULT 0,
+                    job_id TEXT NOT NULL DEFAULT '',
+                    scope_json TEXT NOT NULL DEFAULT '[]',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    source_manifest_json TEXT NOT NULL DEFAULT '[]',
+                    findings_json TEXT NOT NULL DEFAULT '[]',
+                    narrative_json TEXT NOT NULL DEFAULT '{}',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    llm_trace_json TEXT NOT NULL DEFAULT '{}',
+                    error TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS report_studio_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    report_id TEXT NOT NULL,
+                    kind TEXT NOT NULL,
+                    format TEXT NOT NULL,
+                    filename TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    sha256 TEXT NOT NULL,
+                    size INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(report_id) REFERENCES report_studio_jobs(report_id) ON DELETE CASCADE,
+                    UNIQUE(report_id, kind, format)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_findings_scan ON findings(scan_id);
                 CREATE INDEX IF NOT EXISTS idx_finding_triage ON finding_triage_events(scan_id, finding_id, id);
                 CREATE INDEX IF NOT EXISTS idx_events_scan_id ON events(scan_id, id);
@@ -360,6 +396,8 @@ class PersistenceStore:
                 CREATE INDEX IF NOT EXISTS idx_appsec_findings_assessment ON appsec_findings(assessment_id, severity);
                 CREATE INDEX IF NOT EXISTS idx_appsec_runs_assessment ON appsec_tool_runs(assessment_id, id);
                 CREATE INDEX IF NOT EXISTS idx_appsec_artifacts_assessment ON appsec_artifacts(assessment_id, kind);
+                CREATE INDEX IF NOT EXISTS idx_report_studio_jobs_updated ON report_studio_jobs(updated_at);
+                CREATE INDEX IF NOT EXISTS idx_report_studio_artifacts_job ON report_studio_artifacts(report_id, kind);
                 """
             )
             self._ensure_column(conn, "tool_runs", "command_preview", "TEXT NOT NULL DEFAULT ''")
@@ -1570,4 +1608,171 @@ class PersistenceStore:
         item["cve_ids"] = _json_load(item.pop("cve_ids_json"), [])
         item["cwe_ids"] = _json_load(item.pop("cwe_ids_json"), [])
         item["references"] = _json_load(item.pop("references_json"), [])
+        return item
+
+    # ── Standalone Report Studio ───────────────────────────────────────
+
+    def create_report_studio_job(self, report_id: str, data: dict[str, Any]) -> None:
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO report_studio_jobs (
+                    report_id, name, client_name, assessment_type, template_id,
+                    status, phase, progress, scope_json, metadata_json,
+                    source_manifest_json, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    report_id, data.get("name") or report_id,
+                    data.get("client_name", ""), data.get("assessment_type", "vapt"),
+                    data.get("template_id", "vapt_standard"), data.get("status", "queued"),
+                    data.get("phase", "queued"), int(data.get("progress", 0) or 0),
+                    _json_dump(data.get("scope", [])), _json_dump(data.get("metadata", {})),
+                    _json_dump(data.get("source_manifest", [])), now, now,
+                ),
+            )
+
+    def update_report_studio_job(self, report_id: str, updates: dict[str, Any]) -> None:
+        allowed = {
+            "name": "name", "client_name": "client_name",
+            "assessment_type": "assessment_type", "template_id": "template_id",
+            "status": "status", "phase": "phase", "progress": "progress",
+            "job_id": "job_id", "error": "error", "scope": "scope_json",
+            "metadata": "metadata_json", "source_manifest": "source_manifest_json",
+            "findings": "findings_json", "narrative": "narrative_json",
+            "summary": "summary_json", "llm_trace": "llm_trace_json",
+        }
+        json_fields = {
+            "scope", "metadata", "source_manifest", "findings", "narrative",
+            "summary", "llm_trace",
+        }
+        assignments: list[str] = []
+        values: list[Any] = []
+        for key, column in allowed.items():
+            if key not in updates:
+                continue
+            value = _json_dump(updates[key]) if key in json_fields else updates[key]
+            assignments.append(f"{column} = ?")
+            values.append(value)
+        if not assignments:
+            return
+        assignments.append("updated_at = ?")
+        values.extend([_utc_now(), report_id])
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                f"UPDATE report_studio_jobs SET {', '.join(assignments)} WHERE report_id = ?",
+                values,
+            )
+
+    def load_report_studio_job(self, report_id: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM report_studio_jobs WHERE report_id = ?", (report_id,),
+            ).fetchone()
+        if not row:
+            return None
+        item = self._report_studio_job_from_row(row)
+        item["artifacts"] = self.load_report_studio_artifacts(report_id)
+        return item
+
+    def load_report_studio_jobs(self) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM report_studio_jobs ORDER BY updated_at DESC",
+            ).fetchall()
+        jobs: list[dict[str, Any]] = []
+        for row in rows:
+            item = self._report_studio_job_from_row(row, include_details=False)
+            item["artifacts"] = self.load_report_studio_artifacts(item["report_id"])
+            jobs.append(item)
+        return jobs
+
+    def save_report_studio_source(
+        self, report_id: str, *, filename: str, media_type: str, content: str,
+    ) -> dict[str, Any]:
+        safe_filename = self._safe_name(filename, "evidence.txt")
+        data = content.encode("utf-8", errors="replace")
+        out_dir = self.artifact_root / "report-studio" / self._safe_name(report_id, "report") / "sources"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(data).hexdigest()
+        path = out_dir / f"{digest[:12]}_{safe_filename}"
+        path.write_bytes(data)
+        path.chmod(0o600)
+        return {
+            "filename": safe_filename, "media_type": media_type or "text/plain",
+            "path": str(path), "sha256": digest, "size": len(data),
+        }
+
+    def save_report_studio_artifact(
+        self, report_id: str, *, kind: str, format: str, filename: str, content: bytes | str,
+    ) -> dict[str, Any]:
+        safe_kind = self._safe_name(kind, "report")
+        safe_format = self._safe_name(format, "bin")
+        safe_filename = self._safe_name(filename, f"{safe_kind}.{safe_format}")
+        data = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
+        out_dir = self.artifact_root / "report-studio" / self._safe_name(report_id, "report") / "outputs"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / safe_filename
+        path.write_bytes(data)
+        path.chmod(0o600)
+        digest = hashlib.sha256(data).hexdigest()
+        now = _utc_now()
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO report_studio_artifacts (
+                    report_id, kind, format, filename, path, sha256, size, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(report_id, kind, format) DO UPDATE SET
+                    filename=excluded.filename, path=excluded.path, sha256=excluded.sha256,
+                    size=excluded.size, created_at=excluded.created_at
+                """,
+                (report_id, safe_kind, safe_format, safe_filename, str(path), digest, len(data), now),
+            )
+        return {
+            "report_id": report_id, "kind": safe_kind, "format": safe_format,
+            "filename": safe_filename, "path": str(path), "sha256": digest,
+            "size": len(data), "created_at": now,
+        }
+
+    def load_report_studio_artifacts(self, report_id: str) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM report_studio_artifacts WHERE report_id = ? ORDER BY kind, format",
+                (report_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def load_report_studio_artifact(self, report_id: str, kind: str) -> Optional[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM report_studio_artifacts
+                WHERE report_id = ? AND kind = ? ORDER BY id DESC LIMIT 1
+                """,
+                (report_id, self._safe_name(kind, "report")),
+            ).fetchone()
+        return dict(row) if row else None
+
+    @staticmethod
+    def _report_studio_job_from_row(
+        row: sqlite3.Row, *, include_details: bool = True,
+    ) -> dict[str, Any]:
+        item = {
+            "report_id": row["report_id"], "name": row["name"],
+            "client_name": row["client_name"], "assessment_type": row["assessment_type"],
+            "template_id": row["template_id"], "status": row["status"],
+            "phase": row["phase"], "progress": row["progress"], "job_id": row["job_id"],
+            "scope": _json_load(row["scope_json"], []),
+            "metadata": _json_load(row["metadata_json"], {}),
+            "source_manifest": _json_load(row["source_manifest_json"], []),
+            "narrative": _json_load(row["narrative_json"], {}),
+            "summary": _json_load(row["summary_json"], {}),
+            "error": row["error"], "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+        if include_details:
+            item["findings"] = _json_load(row["findings_json"], [])
+            item["llm_trace"] = _json_load(row["llm_trace_json"], {})
         return item

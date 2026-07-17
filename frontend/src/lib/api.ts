@@ -115,6 +115,32 @@ export const api = {
   downloadReport: (id: string, format: string = 'html') =>
     apiUrl(`/api/scans/${id}/report?format=${format}`),
 
+  getReportStudioTemplates: () =>
+    fetchAPI<{ templates: import('@/types').ReportStudioTemplate[] }>('/api/report-studio/templates'),
+
+  createReportStudioReport: (payload: {
+    name: string;
+    client_name: string;
+    assessment_type: string;
+    template_id: string;
+    scope: string[];
+    prepared_by: string;
+    report_period: string;
+    notes: string;
+    sources: Array<{ filename: string; media_type: string; content: string }>;
+  }) => fetchAPI<{ report_id: string; status: string }>('/api/report-studio/reports', {
+    method: 'POST', body: JSON.stringify(payload),
+  }),
+
+  listReportStudioReports: () =>
+    fetchAPI<{ reports: import('@/types').ReportStudioJob[] }>('/api/report-studio/reports'),
+
+  getReportStudioReport: (id: string) =>
+    fetchAPI<import('@/types').ReportStudioJob>(`/api/report-studio/reports/${id}`),
+
+  downloadReportStudioArtifact: (id: string, kind: string) =>
+    apiUrl(`/api/report-studio/reports/${id}/artifacts/${encodeURIComponent(kind)}`),
+
   // Reference data
   getModes: () =>
     fetchAPI<{ modes: import('@/types').ScanMode[] }>('/api/modes'),

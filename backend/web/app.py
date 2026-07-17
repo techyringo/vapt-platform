@@ -45,7 +45,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, FileResponse, PlainTextResponse, Response
 from fastapi.middleware.cors import CORSMiddleware
 from sse_starlette.sse import EventSourceResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from loguru import logger
 
@@ -81,6 +81,26 @@ class AppSecAssessmentRequest(BaseModel):
     repository: str
     ref: str = "main"
     name: str = ""
+
+
+class ReportStudioSourceRequest(BaseModel):
+    """UTF-8 evidence file read by the browser and submitted without multipart."""
+    filename: str
+    media_type: str = "text/plain"
+    content: str
+
+
+class ReportStudioRequest(BaseModel):
+    """Create a report-only job; this never starts a scanner."""
+    name: str
+    client_name: str = ""
+    assessment_type: str = "vapt"
+    template_id: str = "vapt_standard"
+    scope: list[str] = Field(default_factory=list)
+    prepared_by: str = ""
+    report_period: str = ""
+    notes: str = ""
+    sources: list[ReportStudioSourceRequest]
 
 
 class ApiImportRequest(BaseModel):
@@ -1430,6 +1450,127 @@ def create_app(config_path: Optional[str] = None) -> FastAPI:
             path=str(path),
             filename=str(artifact.get("filename") or path.name),
             media_type="application/json",
+        )
+
+    # ─── Standalone Report Studio ───────────────────────────────
+
+    def _public_report_studio_job(report: dict[str, Any]) -> dict[str, Any]:
+        """Remove server filesystem paths from Report Studio API payloads."""
+        item = copy.deepcopy(report)
+        item["source_manifest"] = [
+            {key: source.get(key) for key in ("filename", "media_type", "sha256", "size")}
+            for source in item.get("source_manifest") or []
+        ]
+        item["artifacts"] = [
+            {key: artifact.get(key) for key in ("id", "report_id", "kind", "format", "filename", "sha256", "size", "created_at")}
+            for artifact in item.get("artifacts") or []
+        ]
+        return item
+
+    @app.get("/api/report-studio/templates")
+    async def list_report_studio_templates():
+        from services.report_studio import public_templates
+        return {"templates": public_templates()}
+
+    @app.post("/api/report-studio/reports", status_code=202)
+    async def create_report_studio_report(request: ReportStudioRequest):
+        """Queue a report from uploaded evidence without starting any scan."""
+        from services.report_studio import MAX_SOURCE_BYTES, MAX_TOTAL_BYTES, TEMPLATES
+        from tools.runner import ARQ_QUEUE_NAME, _get_arq_pool
+
+        name = request.name.strip()
+        if not name:
+            raise HTTPException(status_code=422, detail="Report name is required")
+        if request.template_id not in TEMPLATES:
+            raise HTTPException(status_code=422, detail="Unknown report template")
+        if not request.sources or len(request.sources) > 20:
+            raise HTTPException(status_code=422, detail="Attach between 1 and 20 evidence files")
+        allowed_suffixes = {".json", ".txt", ".md", ".csv"}
+        total_bytes = 0
+        for source in request.sources:
+            suffix = Path(source.filename).suffix.lower()
+            size = len(source.content.encode("utf-8", errors="replace"))
+            if suffix not in allowed_suffixes:
+                raise HTTPException(status_code=422, detail=f"Unsupported evidence file: {source.filename}")
+            if size > MAX_SOURCE_BYTES:
+                raise HTTPException(status_code=413, detail=f"Evidence file exceeds {MAX_SOURCE_BYTES} bytes: {source.filename}")
+            total_bytes += size
+        if total_bytes > MAX_TOTAL_BYTES:
+            raise HTTPException(status_code=413, detail=f"Evidence upload exceeds {MAX_TOTAL_BYTES} bytes")
+
+        redis_url = os.environ.get("REDIS_URL", "").strip()
+        if not redis_url:
+            raise HTTPException(status_code=503, detail="Report Studio requires the durable ARQ worker queue (REDIS_URL).")
+
+        report_id = f"report_{uuid4().hex[:20]}"
+        store = get_appsec_store(app)
+        store.create_report_studio_job(report_id, {
+            "name": name[:160], "client_name": request.client_name.strip()[:160],
+            "assessment_type": request.assessment_type.strip()[:80] or "vapt",
+            "template_id": request.template_id, "scope": [value.strip()[:1000] for value in request.scope if value.strip()][:200],
+            "metadata": {
+                "prepared_by": request.prepared_by.strip()[:160],
+                "report_period": request.report_period.strip()[:160],
+                "notes": request.notes.strip()[:4000],
+            },
+        })
+        try:
+            manifest = [
+                store.save_report_studio_source(
+                    report_id, filename=source.filename,
+                    media_type=source.media_type, content=source.content,
+                )
+                for source in request.sources
+            ]
+            store.update_report_studio_job(report_id, {"source_manifest": manifest})
+            pool = await _get_arq_pool(redis_url)
+            job = await pool.enqueue_job(
+                "generate_report_studio", report_id,
+                _queue_name=ARQ_QUEUE_NAME,
+                _job_id=f"report-studio-{report_id}",
+                _expires=3600,
+            )
+            if job is None:
+                raise RuntimeError("Report job could not be queued")
+            store.update_report_studio_job(report_id, {"job_id": job.job_id})
+        except Exception as exc:
+            store.update_report_studio_job(report_id, {"status": "failed", "phase": "queue_failed", "error": str(exc)[:1000]})
+            raise HTTPException(status_code=503, detail=f"Report queue unavailable: {exc}") from exc
+        return {"report_id": report_id, "status": "queued"}
+
+    @app.get("/api/report-studio/reports")
+    async def list_report_studio_reports():
+        return {
+            "reports": [
+                _public_report_studio_job(report)
+                for report in get_appsec_store(app).load_report_studio_jobs()
+            ]
+        }
+
+    @app.get("/api/report-studio/reports/{report_id}")
+    async def get_report_studio_report(report_id: str):
+        report = get_appsec_store(app).load_report_studio_job(report_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Report Studio job not found")
+        return _public_report_studio_job(report)
+
+    @app.get("/api/report-studio/reports/{report_id}/artifacts/{kind}")
+    async def download_report_studio_artifact(report_id: str, kind: str):
+        store = get_appsec_store(app)
+        artifact = store.load_report_studio_artifact(report_id, kind)
+        if not artifact:
+            raise HTTPException(status_code=404, detail="Report artifact not found")
+        path = Path(str(artifact.get("path") or "")).resolve()
+        root = store.artifact_root.resolve()
+        if not path.is_file() or root not in path.parents:
+            raise HTTPException(status_code=404, detail="Report artifact is unavailable")
+        media_types = {
+            "pdf": "application/pdf", "html": "text/html", "json": "application/json",
+            "markdown": "text/markdown", "md": "text/markdown",
+        }
+        return FileResponse(
+            path=str(path), filename=str(artifact.get("filename") or path.name),
+            media_type=media_types.get(kind, "application/octet-stream"),
         )
 
     # ─── Scan Management ────────────────────────────────────────

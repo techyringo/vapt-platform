@@ -61,6 +61,7 @@ import { FindingsWorkspace } from '@/components/workspaces/FindingsWorkspace';
 import { TestCoverageWorkspace } from '@/components/workspaces/TestCoverageWorkspace';
 import { OperationsWorkspace } from '@/components/workspaces/OperationsWorkspace';
 import { AttackSurfaceWorkspace } from '@/components/workspaces/AttackSurfaceWorkspace';
+import { ReportStudioWorkspace } from '@/components/workspaces/ReportStudioWorkspace';
 
 /* ─── Types ─────────────────────────────────────────────── */
 type SeverityFilter = SeverityKey | 'all';
@@ -736,6 +737,7 @@ export default function Dashboard() {
     { id: 'nav-findings', group: 'Navigate', label: 'Findings', sub: 'Vulnerabilities', icon: ShieldAlert, hint: ['2'], keywords: 'vulns issues', run: () => setActiveTab('findings') },
     { id: 'nav-agents', group: 'Navigate', label: 'Attack Surface', sub: 'Canonical assets, paths and decisions', icon: Bot, hint: ['3'], keywords: 'paths decisions evidence surface', run: () => setActiveTab('agents') },
     { id: 'nav-dast', group: 'Navigate', label: 'DAST & API Validation', sub: 'Typed validators and WSTG evidence', icon: ScanSearch, keywords: 'dast api web testing validation proof', run: () => setActiveTab('dast') },
+    { id: 'nav-report-studio', group: 'Navigate', label: 'Report Studio', sub: 'Compile uploaded evidence without a scan', icon: FileText, keywords: 'audit report upload evidence pdf json', run: () => setActiveTab('reports') },
     { id: 'nav-govern', group: 'Navigate', label: 'Test Coverage', sub: 'OWASP WSTG evidence coverage', icon: ClipboardCheck, hint: ['4'], keywords: 'wstg asvs testing evidence audit', run: () => setActiveTab('govern') },
     { id: 'nav-tools', group: 'Administration', label: 'Operations', sub: 'Runner health and logs', icon: Wrench, hint: ['5'], keywords: 'status logs api keys', run: () => setActiveTab('tools') },
     {
@@ -1235,6 +1237,8 @@ export default function Dashboard() {
           )}
 
           {activeTab === 'appsec' && <AppSecWorkspace />}
+
+          {activeTab === 'reports' && <ReportStudioWorkspace />}
 
           {/* ── CONFIG TAB ─────────────────────────────────── */}
           {activeTab === 'config' && (

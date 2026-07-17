@@ -6,6 +6,7 @@ import {
   ClipboardCheck,
   Code2,
   GitBranch,
+  FileText,
   LayoutDashboard,
   Radar,
   ScanSearch,
@@ -87,6 +88,7 @@ export function Sidebar({
         <div className="sidebar-section-label">Application Security</div>
         <SidebarItem active={activeTab === 'appsec'}    icon={Code2}           label="SAST & Supply Chain"           onClick={() => onTabChange('appsec')} />
         <SidebarItem active={activeTab === 'dast'}      icon={ScanSearch}      label="DAST & API Validation"         onClick={() => onTabChange('dast')} />
+        <SidebarItem active={activeTab === 'reports'}   icon={FileText}        label="Report Studio"                 onClick={() => onTabChange('reports')} />
         <SidebarItem active={activeTab === 'govern'}    icon={ClipboardCheck}  label="Test Coverage"              onClick={() => onTabChange('govern')} />
         <div className="sidebar-section-label">Administration</div>
         <SidebarItem active={activeTab === 'tools'}     icon={Wrench}          label="Operations"                    onClick={() => onTabChange('tools')} />

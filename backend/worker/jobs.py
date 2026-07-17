@@ -168,3 +168,17 @@ async def run_appsec_assessment(
         from core.config import AppConfig
         config = AppConfig()
     return await run_assessment(assessment_id, repository, ref, config)
+
+
+async def generate_report_studio(
+    ctx: dict[str, Any],
+    report_id: str,
+) -> dict[str, Any]:
+    """Generate a standalone report from persisted uploaded evidence."""
+    from services.report_studio import run_report_studio_job
+
+    config = ctx.get("config")
+    if config is None:
+        from core.config import AppConfig
+        config = AppConfig()
+    return await run_report_studio_job(report_id, config)
